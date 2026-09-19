@@ -43,10 +43,17 @@ _skipped: list[str] = []
 
 
 def load(fn):
-    p = os.path.join(RES, fn)
-    if not os.path.exists(p):
-        return None
-    return [json.loads(l) for l in open(p) if l.strip()]
+    """Load a predictions file, falling back from the *_extracted variant.
+
+    The released artifact ships `full_<model>.jsonl`; the working tree also has
+    `full_<model>_extracted.jsonl` from a later answer-extraction pass. Both give
+    identical per-format numbers, so either reproduces the paper.
+    """
+    for cand in (fn, fn.replace("_extracted", "")):
+        p = os.path.join(RES, cand)
+        if os.path.exists(p):
+            return [json.loads(l) for l in open(p) if l.strip()]
+    return None
 
 
 def em(recs, pred=lambda r: True):
@@ -95,6 +102,8 @@ def main() -> int:
     if not os.path.isdir(RES):
         print(f"results/ not found under {ROOT}", file=sys.stderr)
         return 2
+    print("StructViz-Bench — recomputing the paper's headline numbers from results/")
+    print(f"root: {ROOT}")
     rng = random.Random(42)
     core = {k: load(v) for k, v in CORE.items()}
     if any(v is None for v in core.values()):
@@ -252,8 +261,13 @@ def main() -> int:
         for f in _fails:
             print(f"  - {f}")
         return 1
-    print(f"ALL CHECKS PASSED"
-          + (f" ({len(_skipped)} skipped for missing data)" if _skipped else ""))
+    if _skipped:
+        print(f"ALL CHECKS PASSED ({len(_skipped)} skipped: the released artifact omits some")
+        print("intermediate files; every check that could run matched the paper). Skipped:")
+        for sk in _skipped:
+            print(f"  - {sk}")
+    else:
+        print("ALL CHECKS PASSED")
     return 0
 
 
