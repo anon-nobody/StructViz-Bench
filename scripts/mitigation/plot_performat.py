@@ -2,10 +2,14 @@
 """Per-format exact-match heatmap (Figure 2). Pure matplotlib, publication style.
 Numbers are the released per-format EM (main paper Table 2). Saves a vector PDF."""
 import matplotlib
-import os
 matplotlib.use("Agg")
+# TrueType (42) rather than the default Type 3, so the figure's text stays searchable
+# and selectable in the submitted PDF.
+matplotlib.rcParams["pdf.fonttype"] = 42
+matplotlib.rcParams["ps.fonttype"] = 42
 import matplotlib.pyplot as plt
 import numpy as np
+import os
 
 models = ["GPT-4o", "Gemini Flash", "Qwen2.5-VL-7B", "Claude Sonnet"]
 panels = {
@@ -49,6 +53,9 @@ for ax, (title, (cols, data)) in zip(axes, panels.items()):
     ax.tick_params(which="both", length=0)
 cbar = fig.colorbar(im, ax=axes, fraction=0.025, pad=0.01)
 cbar.set_label("Exact match (%)", fontsize=8); cbar.ax.tick_params(labelsize=7)
-fig.savefig(os.environ.get("OUT_PDF", "fig_performat.pdf"),
+_out = os.environ.get("OUT_PDF", os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "iclr2027", "fig_performat.pdf"))
+fig.savefig(_out,
             bbox_inches="tight")
-print("saved iclr2027/fig_performat.pdf")
+print(f"saved {_out}")
