@@ -45,9 +45,11 @@ _skipped: list[str] = []
 def load(fn):
     """Load a predictions file, falling back from the *_extracted variant.
 
-    The released artifact ships `full_<model>.jsonl`; the working tree also has
-    `full_<model>_extracted.jsonl` from a later answer-extraction pass. Both give
-    identical per-format numbers, so either reproduces the paper.
+    `full_<model>_extracted.jsonl` carries the answer-extraction pass used for every
+    number in the paper; `full_<model>.jsonl` is the raw run. Per-format exact match
+    is identical in both, but the ensemble's majority vote is over prediction strings
+    and can differ, so the artifact ships the *_extracted files for the four core
+    models and this fallback exists only for the aggregate-range checks.
     """
     for cand in (fn, fn.replace("_extracted", "")):
         p = os.path.join(RES, cand)
