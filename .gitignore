@@ -96,3 +96,12 @@ results/mixed_*.log
 **/credentials*
 *.pem
 *.key
+
+# Released for the reproducibility harness (verify_paper_numbers.py): the answer-extracted
+# predictions of the four core models, the prompt-style ablation, and the cross-modal pilot.
+!results/full_gpt4o_extracted.jsonl
+!results/full_gemini_extracted.jsonl
+!results/full_qwen_extracted.jsonl
+!results/full_claude_extracted.jsonl
+!results/ablation/prompt_*.jsonl
+!results/mixed_*_extracted.jsonl
