@@ -22,6 +22,14 @@ from src.rendering.style_config import (
 )
 
 
+
+# Row limits used by the released benchmark images (see the paper's rendering completeness
+# audit). table_image and the text view show only the first rows of long tables; bar_chart and
+# scatter_plot draw every row. Change these to re-render without truncation.
+TABLE_IMAGE_MAX_ROWS = 12
+TEXT_VIEW_MAX_ROWS = 14
+HEATMAP_MAX_ROWS = 20
+
 class TabularRenderers:
     """Render tabular data with publication-ready visualization methods."""
 
@@ -123,7 +131,7 @@ class TabularRenderers:
         apply_global_style(style)
         numeric = df.select_dtypes(include="number")
         matrix = (
-            numeric.head(20)
+            numeric.head(HEATMAP_MAX_ROWS)
             if not numeric.empty
             else pd.DataFrame([[0.0]], columns=["value"])
         )
@@ -182,7 +190,7 @@ class TabularRenderers:
         fig, ax = plt.subplots(figsize=figure_size(width, height), dpi=DEFAULT_DPI)
         _ = apply_theme(ax)
         ax.axis("off")
-        table_data = df.head(12).copy()
+        table_data = df.head(TABLE_IMAGE_MAX_ROWS).copy()
         table_data = table_data.map(
             lambda x: f"{x:.3f}" if isinstance(x, float) else str(x)
         )
@@ -335,7 +343,7 @@ class TabularRenderers:
             title_font = font_module.load_default()
             body_font = font_module.load_default()
 
-        text_df = df.head(14).copy()
+        text_df = df.head(TEXT_VIEW_MAX_ROWS).copy()
         text_df = text_df.map(
             lambda x: f"{x:.3f}" if isinstance(x, float) else str(x)
         )

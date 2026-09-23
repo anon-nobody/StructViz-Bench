@@ -25,6 +25,12 @@ def norm(s):
 
 
 def match(pred, gold, abs_tol=0.05, rel_tol=0.01):
+    """Tolerance-based numeric match, else exact normalised string match.
+
+    An earlier version also returned True when the gold string appeared anywhere inside a
+    longer answer (substring credit). That rule was removed after review: the paper's LoRA
+    table is now computed by rescore_lora.py from the released records without it.
+    """
     p, g = norm(pred), norm(gold)
     if p == g:
         return True
@@ -32,7 +38,7 @@ def match(pred, gold, abs_tol=0.05, rel_tol=0.01):
         pf, gf = float(p), float(g)
         return abs(pf - gf) <= max(abs_tol, rel_tol * abs(gf))
     except ValueError:
-        return g in str(pred).strip().lower()
+        return False
 
 
 def parse_args():

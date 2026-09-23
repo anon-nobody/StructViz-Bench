@@ -3,8 +3,13 @@
 
 Each L2 question pairs two objects of different modalities and is rendered in five paired
 formats. We learn the best paired format per (modality-pair, task) on half of the questions
-(deterministic hash split; every L2 question is its own object pair, so there is no shared
-source object to leak) and evaluate on the other half against three references:
+(deterministic hash split by question id) and evaluate on the other half against three references.
+
+CAVEAT (not used in the paper): the released L2 set is built from ONE (table, series, graph)
+triple and 30 unique (pair, question, answer) problems, each repeated 15-25 times under
+different item ids. A hash split by item id therefore puts repeats of the same problem on both
+sides, and a question->answer lookup already scores 100% on the test half. The numbers this
+script prints measure nothing about generalisation and are reported only for completeness.
 
   random        expected accuracy of an arbitrary paired format
   fixed (pair)  best single paired format per modality pair, learned on train

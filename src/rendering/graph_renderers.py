@@ -21,6 +21,11 @@ from src.rendering.style_config import (
 )
 
 
+
+# The text view lists at most this many edges; on the default 1024x768 canvas only ~43 lines are
+# visible (see the paper's rendering completeness audit). Change to re-render without truncation.
+TEXT_VIEW_MAX_EDGES = 180
+
 class GraphRenderers:
     """Render graph data in publication-quality visualization methods."""
 
@@ -290,7 +295,7 @@ class GraphRenderers:
         lines.extend(
             f"{str(u):>8} -- {str(v):<8} | {node_degrees.get(u, 0):>3d},"
             f" {node_degrees.get(v, 0):>3d}"
-            for u, v in edges[:180]
+            for u, v in edges[:TEXT_VIEW_MAX_EDGES]
         )
         if not edges:
             lines.append("(no edges)")

@@ -165,7 +165,7 @@ def main() -> int:
                 nsig += 1
     check_bool("all 12 cells: Bonferroni-corrected p<0.01 (10k perms)", nsig == 12, f"{nsig}/12")
 
-    section("Section 5 — information-complete contrast (adjacency_matrix vs text_only, graph)")
+    section("Section 5 — text_only vs adjacency_matrix (graph, whole set; degree-annotation effect)")
     diffs = []
     for disp, recs in core.items():
         q = by_question(recs, "graph")
@@ -180,8 +180,9 @@ def main() -> int:
         pairs = [(v["table_image"], v["text_only"]) for v in q.values()
                  if "table_image" in v and "text_only" in v]
         tab.append(100 * sum(a - b for a, b in pairs) / len(pairs))
-    check_bool("tabular table_image-vs-text residual within 0-8pp", all(-1.0 <= d <= 8.5 for d in tab),
-               ", ".join(f"{d:+.1f}" for d in tab))
+    # whole-set table_image - text_only difference (the paper reports the rows<=12 subset
+    # version below; this whole-set value is printed for reference only)
+    print("  INFO  tabular table_image - text_only, whole set: " + ", ".join(f"{d:+.1f}" for d in tab))
 
     section("Section 5 — value_extraction, the information-access case")
     ve = []
@@ -252,7 +253,7 @@ def main() -> int:
         _skipped.append("prompt ablation")
         print("  SKIP  prompt ablation (files missing)")
 
-    section("Section 4 / Table 7 — cross-modal (L2)")
+    section("Section 4 — cross-modal pilot (L2): overall EM range and Claude parsing check")
     l2 = {}
     for disp, short in keymap.items():
         recs = load(f"mixed_{short}_extracted.jsonl")
@@ -342,46 +343,129 @@ def main() -> int:
             check(f"CR {md}: base", cb, base[md][0], tol=0.6, unit="%")
             check(f"CR {md}: lambda=0", c0, l0[md][0], tol=0.6, unit="%")
             check(f"CR {md}: lambda=1", c1, l1[md][0], tol=0.6, unit="%")
-        for md, gb, g0, g1 in [("tabular", 20.3, 11.9, 10.2), ("timeseries", 19.5, 14.8, 15.4), ("graph", 18.9, 10.7, 10.7)]:
-            check(f"gap {md}: base", gb, base[md][1], tol=0.6)
-            check(f"gap {md}: lambda=0", g0, l0[md][1], tol=0.6)
-            check(f"gap {md}: lambda=1", g1, l1[md][1], tol=0.6)
     else:
         _skipped.append("LoRA records")
         print("  SKIP  LoRA records (scripts/mitigation/*_records_*.jsonl missing)")
 
-    section("Appendix — learned selector on cross-modal (L2) questions")
-    import hashlib as _hl
-    def _l2_side(q): return "train" if int(_hl.md5(q.encode()).hexdigest(), 16) % 2 == 0 else "test"
-    l2sel = {}
-    for disp, short in keymap.items():
-        recs = load(f"mixed_{short}_extracted.jsonl")
-        if recs is None:
-            continue
-        byq = defaultdict(dict); tag = {}
-        for r in recs:
-            byq[r["question_id"]][r["viz_type"]] = float(r.get("exact_match", 0)); tag[r["question_id"]] = (r["modality"], r.get("task", "?"))
-        amt = defaultdict(lambda: defaultdict(list)); am = defaultdict(lambda: defaultdict(list))
-        for q, fm in byq.items():
-            if _l2_side(q) == "train":
-                for v, e in fm.items():
-                    amt[tag[q]][v].append(e); am[tag[q][0]][v].append(e)
-        bmt = {k: max(d, key=lambda v: sum(d[v]) / len(d[v])) for k, d in amt.items()}
-        bm = {k: max(d, key=lambda v: sum(d[v]) / len(d[v])) for k, d in am.items()}
-        n = smt = sm = 0
-        for q, fm in byq.items():
-            if _l2_side(q) != "test":
+    # Accuracy columns of the LoRA table are re-scored from the stored (normalised) predictions
+    # with the tolerance-based numeric metric and NO substring credit (see Appendix, 'Mitigation
+    # training details'); the stored `correct` field came from the older scorer.
+    def _numtol(pred, gold, abs_tol=0.05, rel_tol=0.01):
+        p, g = str(pred).strip().lower(), str(gold).strip().lower()
+        if p == g:
+            return 1.0
+        try:
+            pf, gf = float(p), float(g)
+            return 1.0 if abs(pf - gf) <= max(abs_tol, rel_tol * abs(gf)) else 0.0
+        except ValueError:
+            return 0.0
+    gold = {}
+    if os.path.exists(bench_path if 'bench_path' in dir() else ""):
+        pass
+    _bp = os.path.join(ROOT, "benchmark", "realworld_test.jsonl")
+    if os.path.exists(_bp):
+        for l in open(_bp):
+            if l.strip():
+                r = json.loads(l); gold[r["question_id"]] = str(r["answer"])
+    def _rescore(fn, _keep=_common):
+        p = os.path.join(MIT, fn)
+        if not os.path.exists(p) or not gold:
+            return None
+        _d = {}
+        for r in (json.loads(l) for l in open(p) if l.strip()):
+            if r["qid"] in _keep and r["qid"] not in _d:
+                _d[r["qid"]] = r
+        out = {}
+        for md in MODS:
+            rows = [r for r in _d.values() if r.get("modality") == md]
+            if not rows:
                 continue
-            mean = sum(fm.values()) / len(fm); n += 1
-            mt = bmt.get(tag[q]) or bm.get(tag[q][0]); m = bm.get(tag[q][0])
-            smt += fm.get(mt, mean); sm += fm.get(m, mean)
-        l2sel[disp] = 100 * (smt - sm) / n
-    if l2sel:
-        for disp, stated in [("GPT-4o", 5.7), ("Gemini Flash", 7.1), ("Qwen2.5-VL-7B", 9.6), ("Claude Sonnet", 0.0)]:
-            check(f"L2 selector gain over fixed pairing, {disp}", stated, l2sel.get(disp))
+            fmts = defaultdict(list); same_wrong = 0
+            for r in rows:
+                sc = {f: _numtol(pv, gold[r["qid"]]) for f, pv in r["preds"].items()}
+                for f, c in sc.items():
+                    fmts[f].append(c)
+                normed = {str(v).strip().lower() for v in r["preds"].values()}
+                if not any(sc.values()) and len(normed) == 1:
+                    same_wrong += 1
+            acc = {f: 100 * sum(v) / len(v) for f, v in fmts.items()}
+            out[md] = (sum(acc.values()) / len(acc), max(acc.values()) - min(acc.values()), 100 * same_wrong / len(rows))
+        return out
+    rb, r0, r1 = _rescore("base_records_full.jsonl"), _rescore("after_records_lambda0.jsonl"), _rescore("after_records_full.jsonl")
+    if rb and r0 and r1:
+        for md, (mb, m0, m1), (gb, g0, g1), (sb, s0, s1) in [
+            ("tabular", (22.4, 44.6, 42.3), (16.1, 6.4, 6.8), (7.6, 5.1, 8.5)),
+            ("timeseries", (36.0, 40.9, 41.2), (19.5, 14.8, 15.4), (6.0, 17.4, 14.8)),
+            ("graph", (37.9, 48.4, 48.8), (18.9, 10.7, 10.7), (1.8, 1.8, 12.4)),
+        ]:
+            for tag, stated, got in [("base", (mb, gb, sb), rb[md]), ("lambda=0", (m0, g0, s0), r0[md]), ("lambda=1", (m1, g1, s1), r1[md])]:
+                check(f"LoRA mean acc {md}: {tag}", stated[0], got[0], tol=0.15, unit="%")
+                check(f"LoRA gap {md}: {tag}", stated[1], got[1], tol=0.15)
+                check(f"LoRA same-wrong {md}: {tag}", stated[2], got[2], tol=0.15, unit="%")
     else:
-        _skipped.append("L2 selector")
-        print("  SKIP  L2 selector (mixed files missing)")
+        _skipped.append("LoRA rescoring (benchmark file or records missing)")
+        print("  SKIP  LoRA rescoring (benchmark/realworld_test.jsonl or records missing)")
+
+    section("Section 5 — truncation subset and degree-annotation contrasts (point estimates)")
+    if os.path.exists(_bp):
+        meta = {}
+        for l in open(_bp):
+            if l.strip():
+                r = json.loads(l)
+                n = len(r["data"]) if r["modality"] != "graph" else len(r["data"]["edges"])
+                meta[r["question_id"]] = (r["modality"], r["task"], n)
+        for disp, stated_gap, stated_diff, stated_dq, stated_vis in [
+            ("GPT-4o", 44.7, 1.8, 41.3, 14.8), ("Gemini Flash", 49.8, 1.9, 46.6, 8.0),
+            ("Qwen2.5-VL-7B", 43.3, 9.8, 34.6, 10.6), ("Claude Sonnet", 37.8, 12.9, 31.2, 5.5)]:
+            recs = core[disp]
+            fit = per_format([r for r in recs if r["modality"] == "tabular" and meta.get(r["question_id"], (0, 0, 99))[2] <= 12], "tabular")
+            check(f"tabular gap on rows<=12 subset, {disp}", stated_gap, max(fit.values()) - min(fit.values()))
+            check(f"table_image - text_only on rows<=12, {disp}", stated_diff, fit["table_image"] - fit["text_only"])
+            dq = per_format([r for r in recs if r["modality"] == "graph" and meta.get(r["question_id"], ("", "", 0))[1] == "degree_query"], "graph")
+            check(f"graph text_only - adjacency on degree_query, {disp}", stated_dq, dq["text_only"] - dq["adjacency_matrix"])
+            nd = per_format([r for r in recs if r["modality"] == "graph" and meta.get(r["question_id"], ("", "", 0))[1] != "degree_query" and r["viz_type"] != "text_only"], "graph")
+            check(f"graph visual-only gap excl. degree_query, {disp}", stated_vis, max(nd.values()) - min(nd.values()))
+    else:
+        _skipped.append("Section 5 subset checks")
+        print("  SKIP  subset checks (benchmark file missing)")
+
+    section("Design conditions — what the renderings show, L2 duplication, LoRA object overlap")
+    # These checks verify the *conditions* the paper states about its own assets, not numbers
+    # recomputed from predictions: rendering truncation (Appendix, 'Rendering completeness
+    # audit'), the cross-modal pilot's true size, and the LoRA split's object overlap.
+    bench_path = os.path.join(ROOT, "benchmark", "realworld_test.jsonl")
+    mixed_path = os.path.join(ROOT, "benchmark", "mixed_items.jsonl")
+    if os.path.exists(bench_path):
+        bench = [json.loads(l) for l in open(bench_path) if l.strip()]
+        tab_rows = [len(r["data"]) for r in bench if r["modality"] == "tabular"]
+        ts_len = [len(r["data"]) for r in bench if r["modality"] == "timeseries"]
+        g_edges = [len(r["data"]["edges"]) for r in bench if r["modality"] == "graph"]
+        check("tabular questions with <=12 rows (table_image complete)", 1057, sum(n <= 12 for n in tab_rows), tol=0, unit="")
+        check("tabular questions with >12 rows (table_image truncated)", 708, sum(n > 12 for n in tab_rows), tol=0, unit="")
+        check("tabular questions with >20 rows (heatmap truncated)", 351, sum(n > 20 for n in tab_rows), tol=0, unit="")
+        check("time-series questions with >43 points (text_only overflows)", 1350, sum(n > 43 for n in ts_len), tol=0, unit="")
+        check("graph questions with >43 edges (text_only overflows)", 600, sum(n > 43 for n in g_edges), tol=0, unit="")
+        check("graph degree_query questions (text_only prints degrees)", 208,
+              sum(1 for r in bench if r["modality"] == "graph" and r["task"] == "degree_query"), tol=0, unit="")
+        qid2obj = {r["question_id"]: r["data_id"] for r in bench}
+        tr_p = os.path.join(ROOT, "scripts", "mitigation", "pairs_all_train.jsonl")
+        ev_p = os.path.join(ROOT, "scripts", "mitigation", "pairs_all_eval.jsonl")
+        if os.path.exists(tr_p) and os.path.exists(ev_p):
+            otr = {qid2obj.get(json.loads(l)["question_id"]) for l in open(tr_p) if l.strip()}
+            oev = {qid2obj.get(json.loads(l)["question_id"]) for l in open(ev_p) if l.strip()}
+            check("LoRA source objects shared by train and eval (paper: all 44)", 44, len(otr & oev), tol=0, unit="")
+    else:
+        _skipped.append("benchmark/realworld_test.jsonl")
+        print("  SKIP  rendering-completeness counts (benchmark file missing)")
+    if os.path.exists(mixed_path):
+        mixed = [json.loads(l) for l in open(mixed_path) if l.strip()]
+        payloads = {json.dumps(r["data"], sort_keys=True) for r in mixed}
+        problems = {(r["modality"], r["question"], str(r["answer"])) for r in mixed}
+        check("L2 distinct data payloads (paper: one triple -> 3)", 3, len(payloads), tol=0, unit="")
+        check("L2 unique (pair, question, answer) problems (paper: 30)", 30, len(problems), tol=0, unit="")
+    else:
+        _skipped.append("L2 items")
+        print("  SKIP  L2 duplication check (benchmark/mixed_items.jsonl missing)")
 
     section("Section 4 — scale does not solve it (Qwen 7B -> 32B)")
     q7, q32 = load(CORE["Qwen2.5-VL-7B"]), load("full_qwen32b.jsonl")

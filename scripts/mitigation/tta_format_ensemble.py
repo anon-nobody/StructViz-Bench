@@ -80,7 +80,8 @@ def evaluate(groups):
     for g in rows:
         ems = [em for _v, em, _p in g]
         preds = [p for _v, _em, p in g]
-        per_fmt_sum += sum(ems); per_fmt_cnt += len(ems)
+        # per-question mean so the single-format baseline shares the ensemble's denominator
+        per_fmt_sum += sum(ems) / len(ems); per_fmt_cnt += 1
         orc += 1.0 if any(e >= 0.5 for e in ems) else 0.0
         cr_sum += consistency_rate(preds)
         # majority vote over predictions; tie -> the prediction whose formats have the

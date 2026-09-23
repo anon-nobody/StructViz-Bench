@@ -19,6 +19,11 @@ from src.rendering.style_config import (
 )
 
 
+
+# The text view lists at most this many points; on the default 1024x768 canvas only ~43 lines are
+# visible (see the paper's rendering completeness audit). Change to re-render without truncation.
+TEXT_VIEW_MAX_POINTS = 180
+
 class TimeSeriesRenderers:
     """Render time-series samples in publication-quality visualization styles."""
 
@@ -289,7 +294,7 @@ class TimeSeriesRenderers:
         draw.text((24, 24), title_text, fill=(15, 23, 42), font=title_font)
         lines = ["timestep | value", "----------------"]
         lines.extend(
-            f"{idx:>7d} | {value:>8.4f}" for idx, value in enumerate(arr[:180])
+            f"{idx:>7d} | {value:>8.4f}" for idx, value in enumerate(arr[:TEXT_VIEW_MAX_POINTS])
         )
         draw.multiline_text(
             (24, 70), "\n".join(lines), fill=(31, 41, 51), font=body_font, spacing=4
