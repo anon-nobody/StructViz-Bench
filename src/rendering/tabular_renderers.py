@@ -20,6 +20,7 @@ from src.rendering.style_config import (
     apply_theme,
     figure_size,
 )
+from src.rendering import v2_renderers as v2
 
 
 
@@ -32,6 +33,10 @@ HEATMAP_MAX_ROWS = 20
 
 class TabularRenderers:
     """Render tabular data with publication-ready visualization methods."""
+
+    def __init__(self, suite: str = "v1") -> None:
+        """Select the rendering suite ("v1" = released benchmark images, "v2" = full-data)."""
+        self.suite = suite
 
     def bar_chart(
         self,
@@ -55,6 +60,8 @@ class TabularRenderers:
         Returns:
             Rendered chart as a PIL image.
         """
+        if self.suite == "v2":
+            return v2.tabular_bar_chart(df, title=title, data_meta=data_meta, style=style)
         plt = __import__("matplotlib.pyplot", fromlist=["pyplot"])
         pd = __import__("pandas")
         apply_global_style(style)
@@ -125,6 +132,8 @@ class TabularRenderers:
         Returns:
             Rendered heatmap as a PIL image.
         """
+        if self.suite == "v2":
+            return v2.tabular_heatmap(df, title=title, data_meta=data_meta, style=style)
         plt = __import__("matplotlib.pyplot", fromlist=["pyplot"])
         pd = __import__("pandas")
         sns = __import__("seaborn")
@@ -185,6 +194,8 @@ class TabularRenderers:
         Returns:
             Rendered table as a PIL image.
         """
+        if self.suite == "v2":
+            return v2.tabular_table_image(df, title=title, data_meta=data_meta, style=style)
         plt = __import__("matplotlib.pyplot", fromlist=["pyplot"])
         apply_global_style(style)
         fig, ax = plt.subplots(figsize=figure_size(width, height), dpi=DEFAULT_DPI)
@@ -248,6 +259,8 @@ class TabularRenderers:
         Returns:
             Rendered scatter plot as a PIL image.
         """
+        if self.suite == "v2":
+            return v2.tabular_scatter_plot(df, title=title, data_meta=data_meta, style=style)
         plt = __import__("matplotlib.pyplot", fromlist=["pyplot"])
         apply_global_style(style)
         numeric = df.select_dtypes(include="number")
@@ -331,6 +344,8 @@ class TabularRenderers:
         Returns:
             Rendered text image as a PIL image.
         """
+        if self.suite == "v2":
+            return v2.tabular_text_only(df, title=title, data_meta=data_meta, style=style)
         pil = __import__("PIL.Image", fromlist=["Image"])
         draw_module = __import__("PIL.ImageDraw", fromlist=["ImageDraw"])
         font_module = __import__("PIL.ImageFont", fromlist=["ImageFont"])
@@ -362,6 +377,10 @@ class TabularRenderers:
             (24, 70), content, fill=(31, 41, 51), font=body_font, spacing=4
         )
         return image
+
+    def render_assist(self, df: Any, style: str | None = None) -> dict[str, Image]:
+        """Return the 2x2 calculation-aid images (full table / row bars, with / without means)."""
+        return v2.tabular_assist(df, style=style)
 
     def _to_image(self, fig: Any) -> Image:
         """Convert a matplotlib figure into a PIL image."""

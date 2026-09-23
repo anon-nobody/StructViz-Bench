@@ -19,6 +19,7 @@ from src.rendering.style_config import (
     apply_theme,
     figure_size,
 )
+from src.rendering import v2_renderers as v2
 
 
 
@@ -28,6 +29,10 @@ TEXT_VIEW_MAX_EDGES = 180
 
 class GraphRenderers:
     """Render graph data in publication-quality visualization methods."""
+
+    def __init__(self, suite: str = "v1") -> None:
+        """Select the rendering suite ("v1" = released benchmark images, "v2" = all labels)."""
+        self.suite = suite
 
     def node_link(
         self,
@@ -51,6 +56,8 @@ class GraphRenderers:
         Returns:
             Rendered node-link diagram as a PIL image.
         """
+        if self.suite == "v2":
+            return v2.graph_node_link(graph, title=title, data_meta=data_meta, style=style)
         apply_global_style(style)
         fig, ax = plt.subplots(figsize=figure_size(width, height), dpi=DEFAULT_DPI)
         theme = apply_theme(ax)
@@ -125,6 +132,10 @@ class GraphRenderers:
         Returns:
             Rendered adjacency matrix as a PIL image.
         """
+        if self.suite == "v2":
+            return v2.graph_adjacency_matrix(
+                graph, title=title, data_meta=data_meta, style=style
+            )
         apply_global_style(style)
         nodes = list(graph.nodes())
         matrix = nx.to_numpy_array(graph, nodelist=nodes)
@@ -199,6 +210,14 @@ class GraphRenderers:
         Returns:
             Rendered circular graph view as a PIL image.
         """
+        if self.suite == "v2":
+            return v2.graph_circular_layout(
+                graph,
+                self._community_map(graph),
+                title=title,
+                data_meta=data_meta,
+                style=style,
+            )
         apply_global_style(style)
         fig, ax = plt.subplots(figsize=figure_size(width, height), dpi=DEFAULT_DPI)
         theme = apply_theme(ax)
@@ -270,6 +289,8 @@ class GraphRenderers:
         Returns:
             Rendered text image as a PIL image.
         """
+        if self.suite == "v2":
+            return v2.graph_text_only(graph, title=title, data_meta=data_meta)
         image = Image.new("RGB", (width, height), color=(250, 252, 255))
         draw = ImageDraw.Draw(image)
         try:
@@ -303,6 +324,19 @@ class GraphRenderers:
             (24, 70), "\n".join(lines), fill=(31, 41, 51), font=body_font, spacing=4
         )
         return image
+
+    def text_only_deg(
+        self,
+        graph: nx.Graph[Any],
+        width: int = 1024,
+        height: int = 768,
+        title: str = "",
+        data_meta: dict[str, object] | None = None,
+        style: str | None = None,
+    ) -> Image.Image:
+        """v2 text view listing every edge together with v1's degree columns (assist condition)."""
+        del width, height, style
+        return v2.graph_text_only(graph, title=title, data_meta=data_meta, with_degree=True)
 
     def _to_image(self, fig: plt.Figure) -> Image.Image:
         """Convert a matplotlib figure into a PIL image."""

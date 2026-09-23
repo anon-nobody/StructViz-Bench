@@ -143,3 +143,25 @@ StructViz-Bench/
 
 - **Code**: Apache-2.0
 - **Benchmark data**: CC-BY-4.0
+
+## Corrected rendering suite (v2), no-image baseline, and calculation-aid experiment
+
+The audit in the paper found that many v1 renderings do not encode the queried answer
+(bar charts draw column means only, scatter plots two columns, table/text views the first
+12/14 rows, graph drawings label nodes only below 30 nodes). `scripts/render_suite.py --suite v2`
+re-renders every item so that this "absent" share drops to 21% / 36% / 0% (tables / series /
+graphs; GAF and recurrence plots are kept as deliberately lossy transforms), and
+`--suite assist` renders the 255 mean-comparison questions in a 2x2 (table / row-level bars,
+with / without the column means). The v1 renderers are byte-identical
+(`scripts/analysis/check_v1_unchanged.py`).
+
+- Manifests with image sha256 and sizes: `benchmark/render_v2/manifest.jsonl`,
+  `benchmark/render_assist/manifest.jsonl` (images regenerate deterministically; 1.6 GB, not shipped).
+- Evaluation: `scripts/eval_local_suite.py` (Qwen2.5-VL-7B, revision cc594898, greedy, raw
+  responses kept; `--no-image` sends the question alone with the image phrase removed from the
+  system prompt); `scripts/run_v2_queue.sh` schedules the runs on shared GPUs;
+  `scripts/merge_shards.py` merges and checks shards.
+- Results: `results/v2/v2_qwen.jsonl` (18,975 rows), `results/v2/noimage_qwen.jsonl` (3,795),
+  `results/v2/assist_qwen.jsonl` (1,020). Analysis: `scripts/analysis/v2_analysis.py`
+  (`v2_analysis_output.txt`, `v2_results.json`); `verify_paper_numbers.py` checks the paper's
+  Section 5(iv) numbers against these files.

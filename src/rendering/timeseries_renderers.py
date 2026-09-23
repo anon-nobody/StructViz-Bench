@@ -17,6 +17,7 @@ from src.rendering.style_config import (
     apply_theme,
     figure_size,
 )
+from src.rendering import v2_renderers as v2
 
 
 
@@ -26,6 +27,10 @@ TEXT_VIEW_MAX_POINTS = 180
 
 class TimeSeriesRenderers:
     """Render time-series samples in publication-quality visualization styles."""
+
+    def __init__(self, suite: str = "v1") -> None:
+        """Select the rendering suite; v2 only changes text_only (all points, multi-column)."""
+        self.suite = suite
 
     def line_plot(
         self,
@@ -276,6 +281,10 @@ class TimeSeriesRenderers:
         Returns:
             Rendered text table as a PIL image.
         """
+        if self.suite == "v2":
+            return v2.timeseries_text_only(
+                self._prepare_series(ts), title=title, data_meta=data_meta
+            )
         arr = self._prepare_series(ts)
         image = Image.new("RGB", (width, height), color=(250, 252, 255))
         draw = ImageDraw.Draw(image)

@@ -204,102 +204,125 @@ class QwenVLModel(BaseModel):
             raise RuntimeError("Qwen-VL model initialization returned None")
         model.eval()
 
-    def answer(self, question: str, image: object, metadata: dict[str, Any]) -> str:
-        """Answer one question with local Qwen-VL inference."""
-        torch_module = importlib.import_module("torch")
+    def build_messages(self, question: str, image: object | None) -> list[dict[str, Any]]:
+        """Build the chat messages for one query.
 
+        When ``image`` is None the user turn contains only the question text
+        (text-only / no-image baseline); otherwise the image precedes the text,
+        exactly as in the original v1 evaluation path.
+        """
+        user_content: list[dict[str, Any]] = []
+        if image is not None:
+            user_content.append({"type": "image", "image": image})
+        user_content.append({"type": "text", "text": question})
+        return [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": user_content},
+        ]
+
+    def build_prompt_text(self, question: str, has_image: bool = True) -> str:
+        """Return the chat-templated prompt string (image content independent)."""
         if self._model is None and self._vllm_engine is None:
             self._load()
-
-        task = str(metadata.get("task", "generic"))
-
-        try:
-            if self.use_vllm and self._vllm_engine is not None:
-                # Build chat-templated prompt with <|vision_start|>... markers
-                # via the processor (this is the correct format for Qwen2.5-VL
-                # under vLLM; raw "prompt" without markers leads to malformed
-                # multimodal alignment).
-                if self._processor is None:
-                    raise RuntimeError("Qwen-VL processor required for vLLM path")
-                messages = [
-                    {"role": "system", "content": self.system_prompt},
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "image"},
-                            {"type": "text", "text": question},
-                        ],
-                    },
-                ]
-                templated_prompt = self._processor.apply_chat_template(
-                    messages,
-                    tokenize=False,
-                    add_generation_prompt=True,
-                )
-                vllm_module = importlib.import_module("vllm")
-                sampling = vllm_module.SamplingParams(
-                    max_tokens=self.max_tokens,
-                    temperature=self.temperature,
-                )
-                outputs = self._vllm_engine.generate(
-                    [
-                        {
-                            "prompt": templated_prompt,
-                            "multi_modal_data": {"image": image},
-                        }
-                    ],
-                    sampling,
-                )
-                raw_response = outputs[0].outputs[0].text
-                return parse_answer(raw_response=raw_response, task=task)
-
-            if self._processor is None or self._model is None:
-                raise RuntimeError("Qwen-VL model failed to initialize")
-
-            qwen_utils_module = importlib.import_module("qwen_vl_utils")
-            messages = [
-                {"role": "system", "content": self.system_prompt},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image", "image": image},
-                        {"type": "text", "text": question},
-                    ],
-                },
-            ]
-            text = self._processor.apply_chat_template(
+        if self._processor is None:
+            raise RuntimeError("Qwen-VL processor failed to initialize")
+        messages = self.build_messages(question, "<image>" if has_image else None)
+        if has_image:
+            # The template only needs the placeholder type, not the payload.
+            messages[1]["content"][0] = {"type": "image"}
+        return str(
+            self._processor.apply_chat_template(
                 messages,
                 tokenize=False,
                 add_generation_prompt=True,
             )
-            image_inputs, video_inputs = qwen_utils_module.process_vision_info(messages)
-            inputs = self._processor(
-                text=[text],
-                images=image_inputs,
-                videos=video_inputs,
-                padding=True,
-                return_tensors="pt",
+        )
+
+    def _generate_raw(self, question: str, image: object | None) -> str:
+        """Run greedy generation and return the raw decoded model text."""
+        if self._model is None and self._vllm_engine is None:
+            self._load()
+
+        if self.use_vllm and self._vllm_engine is not None:
+            # Build chat-templated prompt with <|vision_start|>... markers
+            # via the processor (this is the correct format for Qwen2.5-VL
+            # under vLLM; raw "prompt" without markers leads to malformed
+            # multimodal alignment).
+            if self._processor is None:
+                raise RuntimeError("Qwen-VL processor required for vLLM path")
+            templated_prompt = self.build_prompt_text(question, has_image=image is not None)
+            vllm_module = importlib.import_module("vllm")
+            sampling = vllm_module.SamplingParams(
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
             )
-            inputs = inputs.to(self._model.device)
-            generated_ids = self._model.generate(
-                **inputs,
-                max_new_tokens=self.max_tokens,
-                temperature=0.0,
-                do_sample=False,
-            )
-            generated_ids_trimmed = [
-                out_ids[len(in_ids) :]
-                for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-            ]
-            raw_response = self._processor.batch_decode(
+            request: dict[str, Any] = {"prompt": templated_prompt}
+            if image is not None:
+                request["multi_modal_data"] = {"image": image}
+            outputs = self._vllm_engine.generate([request], sampling)
+            return str(outputs[0].outputs[0].text)
+
+        if self._processor is None or self._model is None:
+            raise RuntimeError("Qwen-VL model failed to initialize")
+
+        qwen_utils_module = importlib.import_module("qwen_vl_utils")
+        messages = self.build_messages(question, image)
+        text = self._processor.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        image_inputs, video_inputs = qwen_utils_module.process_vision_info(messages)
+        inputs = self._processor(
+            text=[text],
+            images=image_inputs,
+            videos=video_inputs,
+            padding=True,
+            return_tensors="pt",
+        )
+        inputs = inputs.to(self._model.device)
+        generated_ids = self._model.generate(
+            **inputs,
+            max_new_tokens=self.max_tokens,
+            temperature=0.0,
+            do_sample=False,
+        )
+        generated_ids_trimmed = [
+            out_ids[len(in_ids) :]
+            for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+        ]
+        return str(
+            self._processor.batch_decode(
                 generated_ids_trimmed,
                 skip_special_tokens=True,
                 clean_up_tokenization_spaces=False,
             )[0]
-            return parse_answer(raw_response=raw_response, task=task)
+        )
+
+    def answer_with_raw(
+        self,
+        question: str,
+        image: object | None,
+        metadata: dict[str, Any],
+    ) -> tuple[str, str]:
+        """Answer one question and return ``(raw_response, parsed_answer)``.
+
+        Identical inference to :meth:`answer`; additionally exposes the raw
+        model text before ``parse_answer`` post-processing. ``image=None``
+        runs the text-only chat path (no vision tokens).
+        """
+        torch_module = importlib.import_module("torch")
+        task = str(metadata.get("task", "generic"))
+        try:
+            raw_response = self._generate_raw(question, image)
+            return raw_response, parse_answer(raw_response=raw_response, task=task)
         finally:
             if torch_module.cuda.is_available():
                 torch_module.cuda.empty_cache()
+
+    def answer(self, question: str, image: object, metadata: dict[str, Any]) -> str:
+        """Answer one question with local Qwen-VL inference."""
+        return self.answer_with_raw(question=question, image=image, metadata=metadata)[1]
 
 
 @dataclass(slots=True)

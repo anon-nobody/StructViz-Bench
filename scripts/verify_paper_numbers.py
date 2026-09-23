@@ -460,6 +460,41 @@ def main() -> int:
         _skipped.append("answerability audit")
         print("  SKIP  answerability audit (script or results missing)")
 
+    section("Section 5(iv) — corrected suite (v2), no-image and calculation-aid runs (Qwen2.5-VL-7B)")
+    V2 = os.path.join(ROOT, "results", "v2")
+    def _load_v2(name):
+        p = os.path.join(V2, name)
+        return [json.loads(l) for l in open(p) if l.strip()] if os.path.exists(p) else None
+    v2 = _load_v2("v2_qwen.jsonl"); noimg = _load_v2("noimage_qwen.jsonl"); assist = _load_v2("assist_qwen.jsonl")
+    if v2 and noimg and assist:
+        # dedupe by key (last non-error row wins), as merge_shards.py does
+        _d = {}
+        for r in v2:
+            if str(r.get("prediction")) != "[ERROR]":
+                _d[(r["question_id"], r["viz_type"])] = r
+        v2 = list(_d.values())
+        check("v2 rows (question, format) incl. text_only_deg", 18975, len(v2), tol=0, unit="")
+        main_v2 = [r for r in v2 if r["viz_type"] != "text_only_deg"]
+        for md, fmt, stated in [("tabular", "bar_chart", 48.9), ("tabular", "scatter_plot", 33.7), ("tabular", "table_image", 57.9),
+                                ("timeseries", "text_only", 43.1), ("graph", "text_only", 33.2), ("graph", "node_link", 38.9)]:
+            check(f"v2 {md} {fmt} EM", stated, per_format(main_v2, md).get(fmt), unit="%")
+        for md, stated in [("tabular", 24.2), ("timeseries", 24.0), ("graph", 7.9)]:
+            p = per_format(main_v2, md); check(f"v2 best-worst gap, {md}", stated, max(p.values()) - min(p.values()))
+        for md, stated in [("tabular", 19.1), ("timeseries", 19.9), ("graph", 27.7)]:
+            check(f"no-image EM, {md}", stated, em(noimg, lambda r, m=md: r["modality"] == m), unit="%")
+        for fmt, stated in [("table_full", 76.1), ("table_full_means", 91.0), ("bar_rows", 81.6), ("bar_rows_means", 93.7)]:
+            check(f"assist {fmt} EM", stated, em(assist, lambda r, f=fmt: r["viz_type"] == f), unit="%")
+        # degree confound: text_only_deg - text_only on degree_query
+        bq = defaultdict(dict)
+        for r in v2:
+            if r["modality"] == "graph" and r["task"] == "degree_query":
+                bq[r["question_id"]][r["viz_type"]] = float(r["exact_match"])
+        dd = [v["text_only_deg"] - v["text_only"] for v in bq.values() if "text_only_deg" in v and "text_only" in v]
+        check("graph degree_query: text_only_deg - text_only", 10.6, 100 * sum(dd) / len(dd))
+    else:
+        _skipped.append("v2 suite results")
+        print("  SKIP  v2 / no-image / assist results (results/v2/*.jsonl missing)")
+
     section("Section 5 — truncation subset and degree-annotation contrasts (point estimates)")
     if os.path.exists(_bp):
         meta = {}

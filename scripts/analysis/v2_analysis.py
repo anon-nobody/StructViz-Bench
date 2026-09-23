@@ -1,0 +1,836 @@
+#!/usr/bin/env python3
+"""v1 vs v2 ("answer-complete" rendering) analysis for Qwen2.5-VL-7B.
+
+Stdlib only, no inference. Consumes the v2 evaluation outputs written by
+scripts/eval_local_suite.py and compares them with the released v1 predictions.
+
+    python scripts/analysis/v2_analysis.py            # full run (all v2 files required)
+    python scripts/analysis/v2_analysis.py --smoke    # whatever partial shards exist
+
+Inputs (paths relative to the project root, overridable by flags):
+    benchmark/realworld_test.jsonl           questions, answers, data, data_id (cluster unit)
+    results/full_qwen_extracted.jsonl        v1 predictions, one row per (question_id, viz_type)
+    results/v2/v2_qwen_shard*.jsonl          v2 predictions (merged; deduped by key)
+    results/v2/noimage_qwen.jsonl            question-text-only baseline (viz_type "none")
+    results/v2/assist_qwen.jsonl             tabular calculation-aid 2x2
+    benchmark/render_v2/manifest.jsonl       v2 image sizes + renderer constants
+
+Conventions follow scripts/analysis/cluster_cis.py: every statistic is a ratio estimator
+sum(d)/sum(n) over data_id clusters (point estimate = plain question-level mean); percentile
+95% object-cluster bootstrap CIs (B=5000); two-sided object-level sign-flip permutation p
+(B=10000, p=(hits+1)/(B+1)); each resampling call uses a fresh random.Random(0). Best/worst
+formats are chosen once on the analysed sample and held fixed inside resamples.
+
+Deduplication: eval_local_suite.py appends, and retries [ERROR] rows by appending again, so
+for every (question_id, viz_type) the LAST non-error row wins; keys with only error rows are
+dropped and counted. The "main" v2 format set equals the v1 set; the graph-only diagnostic
+format text_only_deg is used only in section 7.
+
+Writes scripts/analysis/v2_results.json (smoke: v2_results_smoke.json).
+"""
+from __future__ import annotations
+
+import argparse
+import glob
+import json
+import os
+import random
+import re
+import struct
+import sys
+from collections import Counter, defaultdict
+from itertools import combinations
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(HERE))
+sys.path.insert(0, HERE)
+
+import answerability as ans  # noqa: E402  (classify_* -> dict viz_type -> "V"/"D"/"A"/"C")
+
+SEED = 0
+B_BOOT = 5000
+B_PERM = 10000
+
+MODS = ["tabular", "timeseries", "graph"]
+FORMATS = ans.FORMATS  # identical format set in v1 and v2 ("main" formats)
+DEG_FMT = "text_only_deg"
+ASSIST = ["table_full", "table_full_means", "bar_rows", "bar_rows_means"]
+TS_LOSSY = {"gaf", "recurrence_plot"}
+CATS = ["V", "D", "A", "C"]
+ROW_INDEX = "__row_index__"
+
+# v2 renderer defaults (src/rendering/v2_renderers.py); overridden per question by the
+# renderer_constants recorded in the manifest row when present.
+V2_DEFAULTS = {"V2_BAR_ANNOTATE_MAX_ROWS": 35, "V2_BAR_MAX_PANELS": None,
+               "V2_ROW_LABEL_MAX_CHARS": 12, "V2_SCATTER_MAX_PAIR_PANELS": 4}
+SCATTER_LABEL_MAX_CHARS = 8  # row_labels(df, max_chars=8) in tabular_scatter_plot
+
+BRANCH: Counter = Counter()
+
+
+# ---------------------------------------------------------------- loading helpers
+def read_jsonl(path):
+    """Read JSONL, skipping blank and truncated lines (a running writer may leave one)."""
+    out, bad = [], 0
+    with open(path, encoding="utf-8") as fh:
+        for ln in fh:
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                out.append(json.loads(ln))
+            except json.JSONDecodeError:
+                bad += 1
+    if bad:
+        print(f"  WARN {os.path.relpath(path, ROOT)}: skipped {bad} unparseable line(s)")
+    return out
+
+
+def is_error(r):
+    return str(r.get("prediction", "")) == "[ERROR]" or bool(r.get("error"))
+
+
+def dedupe(rows):
+    """Last non-error row per (question_id, viz_type); returns (dict, stats)."""
+    good, err_keys = {}, set()
+    n_dup = 0
+    for r in rows:
+        k = (r["question_id"], r["viz_type"])
+        if is_error(r):
+            err_keys.add(k)
+            continue
+        if k in good:
+            n_dup += 1
+        good[k] = r
+    only_err = err_keys - set(good)
+    return good, {"rows_read": len(rows), "keys_ok": len(good), "duplicates_replaced": n_dup,
+                  "keys_error_only": len(only_err), "error_rows_total":
+                  sum(1 for r in rows if is_error(r))}
+
+
+def em_table(keyed):
+    """{(q, f): row} -> EM[q][f], PRED[q][f]."""
+    em, pred = defaultdict(dict), defaultdict(dict)
+    for (q, f), r in keyed.items():
+        em[q][f] = float(r.get("exact_match", 0) or 0)
+        pred[q][f] = r.get("prediction", "")
+    return em, pred
+
+
+def png_size(path):
+    with open(path, "rb") as fh:
+        head = fh.read(24)
+    if head[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+    return struct.unpack(">II", head[16:24])
+
+
+# ---------------------------------------------------------------- resampling core
+# (copied from scripts/analysis/cluster_cis.py; empty-input guards added)
+def clusters_from(items, q2d):
+    """items: iterable of (question_id, value). Returns list of (sum, n) per data_id."""
+    agg = defaultdict(lambda: [0.0, 0])
+    for q, v in items:
+        a = agg[q2d[q]]
+        a[0] += v
+        a[1] += 1
+    return [tuple(v) for v in agg.values()]
+
+
+def point(cl):
+    n = sum(n for _, n in cl)
+    return 100 * sum(s for s, _ in cl) / n if n else float("nan")
+
+
+def pct(xs, lo=2.5, hi=97.5):
+    xs = sorted(xs)
+    k = len(xs) - 1
+
+    def q(p):
+        f = p / 100 * k
+        i = int(f)
+        j = min(i + 1, k)
+        return xs[i] + (xs[j] - xs[i]) * (f - i)
+
+    return q(lo), q(hi)
+
+
+def cluster_boot(cl, B=None):
+    B = B or B_BOOT
+    if not cl:
+        return {"lo": float("nan"), "hi": float("nan"), "hw": float("nan")}
+    rng = random.Random(SEED)
+    m = len(cl)
+    stats = []
+    for _ in range(B):
+        s = n = 0.0
+        for _ in range(m):
+            a, b = cl[int(rng.random() * m)]
+            s += a
+            n += b
+        stats.append(100 * s / n)
+    lo, hi = pct(stats)
+    return {"lo": lo, "hi": hi, "hw": (hi - lo) / 2}
+
+
+def cluster_perm(cl, B=None):
+    """Two-sided sign-flip test: flip all paired differences of one object together."""
+    B = B or B_PERM
+    if not cl:
+        return float("nan"), None
+    rng = random.Random(SEED)
+    sums = [s for s, _ in cl]
+    N = sum(n for _, n in cl)
+    obs = abs(sum(sums) / N)
+    hits = 0
+    for _ in range(B):
+        t = 0.0
+        for s in sums:
+            t += s if rng.random() < 0.5 else -s
+        if abs(t / N) >= obs - 1e-12:
+            hits += 1
+    return (hits + 1) / (B + 1), hits
+
+
+def summarize(cl, perm=False):
+    out = {"est": point(cl), "n_obj": len(cl), "n_units": sum(n for _, n in cl)}
+    out["obj_ci"] = cluster_boot(cl)
+    if perm:
+        out["obj_perm_p"], out["obj_perm_hits"] = cluster_perm(cl)
+    return out
+
+
+def contrast(items, q2d, perm=False):
+    return summarize(clusters_from(items, q2d), perm=perm)
+
+
+# ---------------------------------------------------------------- formatting
+def pp(x):
+    if x != x:
+        return "nan"
+    return f"{x:+.1f}" if x < 0 or x > 0 else f"{x:.1f}"
+
+
+def f1(x):
+    return "nan" if x is None or x != x else f"{x:.1f}"
+
+
+def fp(p, hits=None):
+    if p != p:
+        return "nan"
+    if hits == 0 or p < 1e-4:
+        return "<1e-4"
+    return f"{p:.4f}"
+
+
+def ci_str(c):
+    if c["lo"] != c["lo"]:
+        return "[nan]"
+    return f"[{c['lo']:+.1f}, {c['hi']:+.1f}]"
+
+
+def section(t):
+    print(f"\n{t}\n" + "-" * 100)
+
+
+def mean100(vals):
+    return 100 * sum(vals) / len(vals) if vals else float("nan")
+
+
+def norm_pred(p):
+    return str(p).strip().lower()
+
+
+# ---------------------------------------------------------------- v2 answerability
+def _first_categorical(rows, num):
+    for c in rows[0]:
+        if c not in num:
+            return c
+    return None
+
+
+def _label_visible(r, label_col, num, max_chars, numeric_ok):
+    """Is the answer (a label_col value) readable from row tick labels ``idx: <first cat>``?"""
+    if label_col == ROW_INDEX:
+        return True
+    if label_col in num:
+        return numeric_ok
+    if label_col != _first_categorical(r["data"], num):
+        return False
+    return len(str(r["answer"])) <= max_chars
+
+
+def classify_v2_tabular(r, const):
+    task, q, rows = r["task"], r["question"], r["data"]
+    nrows = len(rows)
+    num_list = ans.numeric_cols(rows)
+    num = set(num_list)
+    qc = ans.quoted(q)
+    has_avg = "average" in re.sub(r"'[^']*'", "", q).lower()
+    lab_max = const["V2_ROW_LABEL_MAX_CHARS"]
+    bar_cap = const["V2_BAR_MAX_PANELS"]
+    bar_cols = set(num_list[:bar_cap] if bar_cap else num_list)
+    annotated = nrows <= const["V2_BAR_ANNOTATE_MAX_ROWS"]
+    first2 = set(num_list[:2]) if len(num_list) >= 2 else set()
+    k_pairs = const["V2_SCATTER_MAX_PAIR_PANELS"]
+    pairs = [p for p in combinations(range(len(num_list)), 2) if p != (0, 1)][:k_pairs]
+    pair_sets = [{num_list[i], num_list[j]} for i, j in pairs]
+
+    def heat_vis(c):  # heatmap shows numeric columns (annotated) and the index
+        return c in num or c == ROW_INDEX
+
+    def bar_vis(c, need_values):
+        if c == ROW_INDEX:
+            return True
+        return c in bar_cols and (annotated or not need_values)
+
+    out = {"table_image": "D", "text_only": "D"}
+    if task == "value_extraction":
+        col = re.search(r"value of '([^']*)' in row (\d+)", q).group(1)
+        out["table_image"] = out["text_only"] = "V"
+        lab = _label_visible(r, col, num, lab_max, True)
+        out["heatmap"] = "V" if (col in num or lab) else "A"
+        out["bar_chart"] = "V" if (bar_vis(col, True) or (col not in num and lab)) else "A"
+        out["scatter_plot"] = "D" if col in first2 else "A"
+        BRANCH[f"v2tab.value_extraction col_numeric={col in num} label_visible={lab}"] += 1
+    elif task == "comparison" or (task not in ("aggregation", "counterfactual") and has_avg):
+        a, b = qc[0], qc[1]
+        out["heatmap"] = "D" if heat_vis(a) and heat_vis(b) else "A"
+        # Lead-specified: bar chart mean comparison = V (row bars; means must be estimated).
+        out["bar_chart"] = "V" if bar_vis(a, False) and bar_vis(b, False) else "A"
+        out["scatter_plot"] = "A"
+        BRANCH[f"v2tab.comparison-rule[{task}] both_numeric={a in num and b in num}"] += 1
+    elif task in ("aggregation", "filtering", "trend_analysis"):
+        col = qc[0]
+        need = task != "trend_analysis"
+        out["heatmap"] = "D" if heat_vis(col) else "A"
+        out["bar_chart"] = "D" if bar_vis(col, need) else "A"
+        out["scatter_plot"] = "A"
+        BRANCH[f"v2tab.{task} col_numeric={col in num} row_index={col == ROW_INDEX} "
+               f"bar_annotated={annotated}"] += 1
+    elif task in ("ranking", "outlier_detection"):
+        label_col, val_col = qc[0], qc[1]
+        lab_h = _label_visible(r, label_col, num, lab_max, True)
+        lab_s = _label_visible(r, label_col, num, SCATTER_LABEL_MAX_CHARS, False)
+        out["heatmap"] = "D" if heat_vis(val_col) and lab_h else "A"
+        out["bar_chart"] = ("D" if bar_vis(val_col, task == "outlier_detection") and lab_h
+                            else "A")
+        out["scatter_plot"] = "D" if val_col in first2 and lab_s else "A"
+        BRANCH[f"v2tab.{task} value_numeric={val_col in num or val_col == ROW_INDEX} "
+               f"label_visible={lab_h}"] += 1
+    elif task == "correlation":
+        a, b = qc[0], qc[1]
+        out["heatmap"] = "D" if heat_vis(a) and heat_vis(b) else "A"
+        out["bar_chart"] = "D" if bar_vis(a, False) and bar_vis(b, False) else "A"
+        vis = {a, b} == first2 or {a, b} in pair_sets
+        out["scatter_plot"] = "V" if vis else "A"
+        in_panel = {a, b} in pair_sets
+        BRANCH[f"v2tab.correlation first_pair={first2 == {a, b}} pair_panel={in_panel}"] += 1
+    elif task == "counterfactual":
+        cols = qc[:2] if len(qc) >= 2 else qc
+        out["heatmap"] = "D" if all(heat_vis(c) for c in cols) else "A"
+        out["bar_chart"] = "D" if all(bar_vis(c, False) for c in cols) else "A"
+        out["scatter_plot"] = "A"
+        BRANCH[f"v2tab.counterfactual cols_numeric={all(c in num for c in cols)}"] += 1
+    else:
+        raise ValueError(task)
+    return out
+
+
+def classify_v2_timeseries(r):
+    out = ans.classify_timeseries(r)
+    out["text_only"] = out["line_plot"]  # v2 text view lists every point
+    return out
+
+
+def classify_v2_graph(r):
+    task, q = r["task"], r["question"]
+    fmts = FORMATS["graph"] + [DEG_FMT]
+    if task == "connectivity" or (task == "counterfactual"
+                                  and ans.RE_CF_ADD.fullmatch(q.strip())):
+        return {f: "C" for f in fmts}
+    out = {f: "D" for f in fmts}
+    if task == "degree_query":
+        out[DEG_FMT] = "V"
+    return out
+
+
+def classify_v2(r, const):
+    md = r["modality"]
+    if md == "tabular":
+        return classify_v2_tabular(r, const)
+    if md == "timeseries":
+        return classify_v2_timeseries(r)
+    return classify_v2_graph(r)
+
+
+# ---------------------------------------------------------------- per-question tables
+def complete(EM, qs, fmts):
+    return [q for q in qs if q in EM and all(f in EM[q] for f in fmts)]
+
+
+def gap_block(EM, qs, fmts, q2d):
+    """Best-worst gap on questions with every format; best/worst fixed on this sample."""
+    qs = complete(EM, qs, fmts)
+    if not qs:
+        return {"n_q": 0}
+    pf = {f: mean100([EM[q][f] for q in qs]) for f in fmts}
+    b, w = max(pf, key=pf.get), min(pf, key=pf.get)
+    r = contrast([(q, EM[q][b] - EM[q][w]) for q in qs], q2d, perm=True)
+    r.update(n_q=len(qs), best=b, worst=w, per_format=pf)
+    return r
+
+
+def flip_cr(EM, PRED, qs, fmts):
+    qs = complete(EM, qs, fmts)
+    flips, crs = [], []
+    for q in qs:
+        flips.append(float(len({EM[q][f] for f in fmts}) > 1))
+        pr = [norm_pred(PRED[q][f]) for f in fmts]
+        k = len(pr)
+        agree = sum(1 for i in range(k) for j in range(i + 1, k) if pr[i] == pr[j])
+        crs.append(agree / (k * (k - 1) / 2) if k > 1 else 1.0)
+    return qs, flips, crs
+
+
+def gap_line(tag, g):
+    if not g.get("n_q"):
+        return f"  {tag:34s} (no complete questions)"
+    return (f"  {tag:34s} {g['best']:>16s} {g['worst']:>16s} {f1(g['est']):>6s} "
+            f"{ci_str(g['obj_ci']):>15s} {fp(g['obj_perm_p'], g['obj_perm_hits']):>7s} "
+            f"{g['n_q']:5d} {g['n_obj']:4d}")
+
+
+# ---------------------------------------------------------------- sections
+def s1_categories(meta, cat1, cat2, qs_by_mod):
+    section("1. Answerability categories per modality: share of (question, format) pairs, "
+            "v1 vs v2 (main formats)")
+    print(f"  {'modality':10s} {'suite':5s} {'pairs':>6s} " + " ".join(f"{k:>6s}" for k in CATS))
+    out = {}
+    for md in MODS:
+        rec = {}
+        for tag, cat in (("v1", cat1), ("v2", cat2)):
+            c = Counter()
+            for q in qs_by_mod[md]:
+                c.update(cat[q][f] for f in FORMATS[md])
+            tot = sum(c.values())
+            rec[tag] = {"n_pairs": tot, **{k: 100 * c[k] / tot for k in CATS}}
+            print(f"  {md:10s} {tag:5s} {tot:6d} "
+                  + " ".join(f"{f1(rec[tag][k]):>6s}" for k in CATS))
+        rec["A_share_change"] = rec["v2"]["A"] - rec["v1"]["A"]
+        fa1 = sum(all(cat1[q][f] in "VD" for f in FORMATS[md]) for q in qs_by_mod[md])
+        fa2 = sum(all(cat2[q][f] in "VD" for f in FORMATS[md]) for q in qs_by_mod[md])
+        rec["fully_answerable_q"] = {"v1": fa1, "v2": fa2, "n": len(qs_by_mod[md])}
+        print(f"  {md:10s} A share change v2-v1 {pp(rec['A_share_change'])} pp;  fully "
+              f"answerable questions v1 {fa1}/{len(qs_by_mod[md])}, v2 {fa2}/"
+              f"{len(qs_by_mod[md])}")
+        out[md] = rec
+    return out
+
+
+def s2_per_format(EM1, EM2, qs_by_mod, q2d):
+    section("2. Per-format EM v1 vs v2 (each on all available questions) and paired v2-v1 "
+            "change (object-cluster 95% CI)")
+    print(f"  {'modality':10s} {'format':16s} {'v1':>6s} {'n1':>5s} {'v2':>6s} {'n2':>5s} "
+          f"{'d(v2-v1)':>8s} {'obj CI':>15s} {'n_pair':>6s} {'n_obj':>5s}")
+    out = {}
+    for md in MODS:
+        for f in FORMATS[md]:
+            q1 = [q for q in qs_by_mod[md] if f in EM1.get(q, {})]
+            q2 = [q for q in qs_by_mod[md] if f in EM2.get(q, {})]
+            both = [q for q in q2 if f in EM1.get(q, {})]
+            r = contrast([(q, EM2[q][f] - EM1[q][f]) for q in both], q2d)
+            rec = {"v1": mean100([EM1[q][f] for q in q1]), "n_v1": len(q1),
+                   "v2": mean100([EM2[q][f] for q in q2]), "n_v2": len(q2),
+                   "v1_on_paired": mean100([EM1[q][f] for q in both]),
+                   "v2_on_paired": mean100([EM2[q][f] for q in both]), "paired": r}
+            out[f"{md}|{f}"] = rec
+            print(f"  {md:10s} {f:16s} {f1(rec['v1']):>6s} {len(q1):5d} {f1(rec['v2']):>6s} "
+                  f"{len(q2):5d} {pp(r['est']):>8s} {ci_str(r['obj_ci']):>15s} "
+                  f"{r['n_units']:6d} {r['n_obj']:5d}")
+    return out
+
+
+def s3_gaps(EM1, EM2, cat1, cat2, qs_by_mod, q2d):
+    section("3. Best-worst gap per modality (object sign-flip p, object-cluster CI)")
+    print(f"  {'sample':34s} {'best':>16s} {'worst':>16s} {'gap':>6s} {'obj CI':>15s} "
+          f"{'p_obj':>7s} {'n_q':>5s} {'nobj':>4s}")
+    out = {}
+    for md in MODS:
+        fm = FORMATS[md]
+        allq = qs_by_mod[md]
+        rec = {"v1_all": gap_block(EM1, allq, fm, q2d),
+               "v2_all": gap_block(EM2, allq, fm, q2d)}
+        # same questions for both suites (complete in v1 and v2)
+        common = complete(EM2, complete(EM1, allq, fm), fm)
+        rec["v1_on_v2_complete"] = gap_block(EM1, common, fm, q2d)
+        if md == "timeseries":
+            fm_nl = [f for f in fm if f not in TS_LOSSY]
+            rec["v2_excl_gaf_rp"] = gap_block(EM2, allq, fm_nl, q2d)
+            rec["v1_excl_gaf_rp"] = gap_block(EM1, allq, fm_nl, q2d)
+        fa2 = [q for q in allq if all(cat2[q][f] in "VD" for f in fm)]
+        fa1 = [q for q in allq if all(cat1[q][f] in "VD" for f in fm)]
+        rec["v2_fully_answerable"] = gap_block(EM2, fa2, fm, q2d)
+        rec["v1_on_v2_fully_answerable"] = gap_block(EM1, fa2, fm, q2d)
+        rec["v1_fully_answerable_v1cats"] = gap_block(EM1, fa1, fm, q2d)
+        rec["n_fully_answerable_v2"] = len(fa2)
+        print(f" {md}")
+        for k, g in rec.items():
+            if isinstance(g, dict):
+                print(gap_line(k, g))
+        out[md] = rec
+    print("\n  HEADLINE (same information, different rendering) = v2_fully_answerable rows: "
+          "every main v2 format V or D, C questions excluded.")
+    return out
+
+
+def s4_flip(EM1, P1, EM2, P2, qs_by_mod, q2d):
+    section("4. Flip rate (% questions whose EM differs across formats) and Consistency Rate "
+            "(mean share of agreeing format pairs), main formats")
+    print(f"  {'modality':10s} {'sample':18s} {'flip v1':>7s} {'flip v2':>7s} {'d':>6s} "
+          f"{'obj CI':>15s} {'CR v1':>6s} {'CR v2':>6s} {'d':>6s} {'obj CI':>15s} {'n_q':>5s}")
+    out = {}
+    for md in MODS:
+        fm = FORMATS[md]
+        rec = {}
+        q1, fl1, cr1 = flip_cr(EM1, P1, qs_by_mod[md], fm)
+        q2, fl2, cr2 = flip_cr(EM2, P2, qs_by_mod[md], fm)
+        rec["v1_all"] = {"n": len(q1), "flip": mean100(fl1), "cr": mean100(cr1)}
+        rec["v2_all"] = {"n": len(q2), "flip": mean100(fl2), "cr": mean100(cr2)}
+        common = sorted(set(q1) & set(q2))
+        d1 = dict(zip(q1, zip(fl1, cr1)))
+        d2 = dict(zip(q2, zip(fl2, cr2)))
+        df = contrast([(q, d2[q][0] - d1[q][0]) for q in common], q2d)
+        dc = contrast([(q, d2[q][1] - d1[q][1]) for q in common], q2d)
+        rec["paired"] = {"n": len(common),
+                         "flip_v1": mean100([d1[q][0] for q in common]),
+                         "flip_v2": mean100([d2[q][0] for q in common]),
+                         "cr_v1": mean100([d1[q][1] for q in common]),
+                         "cr_v2": mean100([d2[q][1] for q in common]),
+                         "flip_diff": df, "cr_diff": dc}
+        p = rec["paired"]
+        print(f"  {md:10s} {'all (unpaired)':18s} {f1(rec['v1_all']['flip']):>7s} "
+              f"{f1(rec['v2_all']['flip']):>7s} {'':>6s} {'':>15s} {f1(rec['v1_all']['cr']):>6s} "
+              f"{f1(rec['v2_all']['cr']):>6s} {'':>6s} {'':>15s} "
+              f"{rec['v1_all']['n']:5d}/{rec['v2_all']['n']}")
+        print(f"  {md:10s} {'paired':18s} {f1(p['flip_v1']):>7s} {f1(p['flip_v2']):>7s} "
+              f"{pp(df['est']):>6s} {ci_str(df['obj_ci']):>15s} {f1(p['cr_v1']):>6s} "
+              f"{f1(p['cr_v2']):>6s} {pp(dc['est']):>6s} {ci_str(dc['obj_ci']):>15s} "
+              f"{len(common):5d}")
+        out[md] = rec
+    return out
+
+
+def load_prior():
+    p = os.path.join(HERE, "prior_and_subsets_results.json")
+    if not os.path.exists(p):
+        return None
+    d = json.load(open(p))
+    return {md: {"in_sample": d.get("prior_in_sample", {}).get(md, {}).get("acc"),
+                 "cv_mean": d.get("prior_cv", {}).get(md, {}).get("mean")} for md in MODS}
+
+
+def s5_noimage(EM0, EM2, meta, qs_by_mod, q2d):
+    section("5. No-image baseline (question text only)")
+    out = {"prior_file": None, "by_modality": {}, "by_task": {}}
+    prior = load_prior()
+    out["prior_file"] = prior
+    # in-sample task-majority prior (predict the most frequent answer of the task)
+    by_task = defaultdict(list)
+    for q, r in meta.items():
+        by_task[(r["modality"], r["task"])].append(norm_pred(r["answer"]))
+    task_prior = {k: 100 * Counter(v).most_common(1)[0][1] / len(v) for k, v in by_task.items()}
+
+    print(f"  {'modality':10s} {'noimg':>6s} {'n':>5s} {'prior_in':>8s} {'prior_cv':>8s} "
+          f"{'taskMaj':>7s} | formats beating no-image (obj CI lo>0) / total")
+    for md in MODS:
+        qs = [q for q in qs_by_mod[md] if q in EM0]
+        em0 = mean100([EM0[q] for q in qs])
+        tm = mean100([task_prior[(md, meta[q]["task"])] / 100 for q in qs])
+        fmt_rows = {}
+        n_beat = 0
+        for f in FORMATS[md]:
+            qq = [q for q in qs if f in EM2.get(q, {})]
+            r = contrast([(q, EM2[q][f] - EM0[q]) for q in qq], q2d)
+            beat = r["obj_ci"]["lo"] > 0
+            n_beat += beat
+            fmt_rows[f] = {"v2_em": mean100([EM2[q][f] for q in qq]),
+                           "noimg_em": mean100([EM0[q] for q in qq]), "diff": r, "beats": beat}
+        # questions the no-image model gets right: does every v2 format also get them?
+        comp = complete(EM2, qs, FORMATS[md])
+        right0 = [q for q in comp if EM0[q] >= 0.5]
+        all_right = sum(all(EM2[q][f] >= 0.5 for f in FORMATS[md]) for q in right0)
+        pr = prior[md] if prior else {"in_sample": None, "cv_mean": None}
+        out["by_modality"][md] = {
+            "noimg_em": em0, "n": len(qs), "prior_in_sample": pr["in_sample"],
+            "prior_cv_mean": pr["cv_mean"], "task_majority_prior": tm, "formats": fmt_rows,
+            "n_formats_beating": n_beat, "n_formats": len(FORMATS[md]),
+            "noimg_correct_n": len(right0), "noimg_correct_all_v2_correct": all_right,
+            "noimg_correct_all_v2_correct_pct": mean100([1.0] * all_right
+                                                        + [0.0] * (len(right0) - all_right))}
+        o = out["by_modality"][md]
+        print(f"  {md:10s} {f1(em0):>6s} {len(qs):5d} {f1(pr['in_sample']):>8s} "
+              f"{f1(pr['cv_mean']):>8s} {f1(tm):>7s} | {n_beat}/{len(FORMATS[md])}")
+        for f, fr in fmt_rows.items():
+            d = fr["diff"]
+            print(f"      {f:16s} v2 {f1(fr['v2_em']):>5s} vs noimg {f1(fr['noimg_em']):>5s}  "
+                  f"d {pp(d['est']):>6s} {ci_str(d['obj_ci']):>15s} n {d['n_units']:5d} "
+                  f"{'BEATS' if fr['beats'] else ''}")
+        print(f"      no-image correct on {len(right0)} complete questions; every v2 format "
+              f"also correct on {all_right} ({f1(o['noimg_correct_all_v2_correct_pct'])}%)")
+    print(f"\n  per task: {'modality':10s} {'task':28s} {'noimg':>6s} {'taskMaj':>7s} {'n':>4s}")
+    for (md, t) in sorted(by_task):
+        qs = [q for q in qs_by_mod[md] if q in EM0 and meta[q]["task"] == t]
+        if not qs:
+            continue
+        e = mean100([EM0[q] for q in qs])
+        out["by_task"][f"{md}|{t}"] = {"noimg_em": e, "n": len(qs),
+                                       "task_majority_prior": task_prior[(md, t)]}
+        print(f"            {md:10s} {t[:28]:28s} {f1(e):>6s} {f1(task_prior[(md, t)]):>7s} "
+              f"{len(qs):4d}")
+    return out
+
+
+def s6_assist(EMa, meta, q2d):
+    section("6. Assist 2x2 (tabular): {table, bar} x {means absent, present}")
+    qs_all = [q for q in EMa if all(c in EMa[q] for c in ASSIST)]
+
+    def avg_q(q):
+        return "average" in re.sub(r"'[^']*'", "", meta[q]["question"]).lower()
+
+    subsets = {
+        "all": qs_all,
+        "comparison": [q for q in qs_all if meta[q]["task"] == "comparison"],
+        "aggregation_mean": [q for q in qs_all if meta[q]["task"] == "aggregation"
+                             and avg_q(q)],
+    }
+    out = {"task_counts": dict(Counter(meta[q]["task"] for q in qs_all)),
+           "n_questions_with_any": len(EMa)}
+    print(f"  questions with all 4 conditions: {len(qs_all)} (any condition: {len(EMa)}); "
+          f"tasks {out['task_counts']}")
+    effects = {
+        "means_effect_table": ("table_full_means", "table_full", None, None),
+        "means_effect_bar": ("bar_rows_means", "bar_rows", None, None),
+        "format_effect_no_means(table-bar)": ("table_full", "bar_rows", None, None),
+        "format_effect_with_means(table-bar)": ("table_full_means", "bar_rows_means", None, None),
+        "interaction(table_means_eff - bar_means_eff)":
+            ("table_full_means", "table_full", "bar_rows_means", "bar_rows"),
+    }
+    for name, qs in subsets.items():
+        rec = {"n": len(qs), "means": {c: mean100([EMa[q][c] for q in qs]) for c in ASSIST}}
+        print(f"\n  [{name}] n={len(qs)}  " + "  ".join(f"{c} {f1(rec['means'][c])}"
+                                                    for c in ASSIST))
+        for ename, (a, b, c, d) in effects.items():
+            if c is None:
+                items = [(q, EMa[q][a] - EMa[q][b]) for q in qs]
+            else:
+                items = [(q, (EMa[q][a] - EMa[q][b]) - (EMa[q][c] - EMa[q][d])) for q in qs]
+            r = contrast(items, q2d, perm=True)
+            rec[ename] = r
+            print(f"    {ename:46s} {pp(r['est']):>6s} {ci_str(r['obj_ci']):>15s} "
+                  f"p_obj {fp(r['obj_perm_p'], r['obj_perm_hits']):>7s} n {r['n_units']} "
+                  f"n_obj {r['n_obj']}")
+        out[name] = rec
+    return out
+
+
+def s7_degree(EM2, meta, qs_by_mod, q2d):
+    section("7. Graph degree confound: v2 text_only_deg minus text_only (paired)")
+    qs = [q for q in qs_by_mod["graph"] if DEG_FMT in EM2.get(q, {})
+          and "text_only" in EM2.get(q, {})]
+    out = {}
+    for name, sel in (("degree_query", lambda q: meta[q]["task"] == "degree_query"),
+                      ("other_tasks", lambda q: meta[q]["task"] != "degree_query")):
+        qq = [q for q in qs if sel(q)]
+        r = contrast([(q, EM2[q][DEG_FMT] - EM2[q]["text_only"]) for q in qq], q2d, perm=True)
+        r.update(em_text_only=mean100([EM2[q]["text_only"] for q in qq]),
+                 em_text_only_deg=mean100([EM2[q][DEG_FMT] for q in qq]))
+        out[name] = r
+        print(f"  {name:13s} text_only {f1(r['em_text_only']):>5s}  text_only_deg "
+              f"{f1(r['em_text_only_deg']):>5s}  d {pp(r['est']):>6s} {ci_str(r['obj_ci']):>15s} "
+              f"p_obj {fp(r['obj_perm_p'], r['obj_perm_hits'])}  n {r['n_units']} "
+              f"n_obj {r['n_obj']}")
+    return out
+
+
+def v1_image_sizes():
+    """Mean pixels per (modality, format) over the v1 PNGs present in benchmark/rendered."""
+    acc = defaultdict(list)
+    known = sorted({f for fs in FORMATS.values() for f in fs}, key=len, reverse=True)
+    for p in glob.glob(os.path.join(ROOT, "benchmark", "rendered", "**", "*.png"),
+                       recursive=True):
+        base = os.path.basename(p)[:-4]
+        md = base.split("_")[0]
+        f = next((k for k in known if base.endswith("_" + k)), None)
+        sz = png_size(p)
+        if f and sz and md in FORMATS:
+            acc[(md, f)].append(sz[0] * sz[1])
+    return acc
+
+
+def s8_cost(v2rows, man, noimg_rows):
+    section("8. Cost: mean image pixels (Mpx) and mean latency (s) per format")
+    v1px = v1_image_sizes()
+    px2 = defaultdict(list)
+    for (q, f), m in man.items():
+        if m.get("width") and m.get("height"):
+            px2[(m["modality"], f)].append(m["width"] * m["height"])
+    lat2, rowpx = defaultdict(list), defaultdict(list)
+    for (q, f), r in v2rows.items():
+        if r.get("latency_s") is not None:
+            lat2[(r["modality"], f)].append(float(r["latency_s"]))
+        if r.get("image_w") and r.get("image_h"):
+            rowpx[(r["modality"], f)].append(r["image_w"] * r["image_h"])
+    print(f"  {'modality':10s} {'format':16s} {'v1 Mpx':>7s} {'n':>5s} {'v2 Mpx':>7s} {'n':>5s} "
+          f"{'v2row Mpx':>9s} {'v2 lat':>7s} {'n':>5s}   (v1 latency not recorded)")
+    out = {}
+
+    def mpx(v):
+        return sum(v) / len(v) / 1e6 if v else float("nan")
+
+    for md in MODS:
+        for f in FORMATS[md] + ([DEG_FMT] if md == "graph" else []):
+            k = (md, f)
+            rec = {"v1_mpx": mpx(v1px.get(k, [])), "n_v1_png": len(v1px.get(k, [])),
+                   "v2_mpx_manifest": mpx(px2.get(k, [])), "n_v2_manifest": len(px2.get(k, [])),
+                   "v2_mpx_rows": mpx(rowpx.get(k, [])),
+                   "v2_latency_s": (sum(lat2[k]) / len(lat2[k])) if lat2.get(k) else None,
+                   "n_v2_latency": len(lat2.get(k, []))}
+            out[f"{md}|{f}"] = rec
+            lat = rec["v2_latency_s"]
+            lat_s = f"{lat:.2f}" if lat is not None else "n/a"
+            print(f"  {md:10s} {f:16s} {rec['v1_mpx']:7.2f} {rec['n_v1_png']:5d} "
+                  f"{rec['v2_mpx_manifest']:7.2f} {rec['n_v2_manifest']:5d} "
+                  f"{rec['v2_mpx_rows']:9.2f} {lat_s:>7s} {rec['n_v2_latency']:5d}")
+    lat0 = [float(r["latency_s"]) for r in noimg_rows.values() if r.get("latency_s") is not None]
+    out["noimage_latency_s"] = sum(lat0) / len(lat0) if lat0 else None
+    print(f"  no-image mean latency: "
+          f"{f1(out['noimage_latency_s']) if lat0 else 'n/a'} s (n {len(lat0)}); "
+          f"v1 pixels from the {sum(len(v) for v in v1px.values())} v1 PNGs present locally")
+    return out
+
+
+# ---------------------------------------------------------------- main
+def parse_args():
+    p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    p.add_argument("--smoke", action="store_true",
+                   help="Run on whatever v2 files/shards exist; B_boot=1000, B_perm=2000.")
+    p.add_argument("--v1", default=os.path.join(ROOT, "results", "full_qwen_extracted.jsonl"))
+    p.add_argument("--v2-dir", default=os.path.join(ROOT, "results", "v2"))
+    p.add_argument("--manifest", default=os.path.join(ROOT, "benchmark", "render_v2",
+                                                      "manifest.jsonl"))
+    p.add_argument("--benchmark", default=os.path.join(ROOT, "benchmark",
+                                                       "realworld_test.jsonl"))
+    p.add_argument("--out", default=None)
+    p.add_argument("--b-boot", type=int, default=None)
+    p.add_argument("--b-perm", type=int, default=None)
+    return p.parse_args()
+
+
+def main() -> int:
+    global B_BOOT, B_PERM
+    a = parse_args()
+    if a.smoke:
+        B_BOOT, B_PERM = 1000, 2000
+    B_BOOT = a.b_boot or B_BOOT
+    B_PERM = a.b_perm or B_PERM
+    out_path = a.out or os.path.join(HERE, "v2_results_smoke.json" if a.smoke
+                                     else "v2_results.json")
+
+    bench = read_jsonl(a.benchmark)
+    meta = {r["question_id"]: r for r in bench}
+    q2d = {q: r["data_id"] for q, r in meta.items()}
+    qs_by_mod = {md: [q for q, r in meta.items() if r["modality"] == md] for md in MODS}
+
+    shard_paths = sorted(glob.glob(os.path.join(a.v2_dir, "v2_qwen_shard*.jsonl")))
+    noimg_path = os.path.join(a.v2_dir, "noimage_qwen.jsonl")
+    assist_path = os.path.join(a.v2_dir, "assist_qwen.jsonl")
+    missing = [p for p in [noimg_path, assist_path] if not os.path.exists(p)]
+    if not shard_paths:
+        missing.insert(0, os.path.join(a.v2_dir, "v2_qwen_shard*.jsonl"))
+    if missing and not a.smoke:
+        print("ERROR: missing inputs (use --smoke for partial runs):\n  " + "\n  ".join(missing))
+        return 2
+
+    print(f"StructViz-Bench v2 analysis, Qwen2.5-VL-7B  (seed {SEED}, B_boot={B_BOOT}, "
+          f"B_perm={B_PERM}{', SMOKE' if a.smoke else ''})")
+    print(f"questions {len(meta)}  objects {len(set(q2d.values()))}")
+
+    # ---- manifest (sizes + renderer constants)
+    man = {}
+    if os.path.exists(a.manifest):
+        for r in read_jsonl(a.manifest):
+            man[(r["question_id"], r["viz_type"])] = r
+    const_by_q = {}
+    const_src = Counter()
+    for q in qs_by_mod["tabular"]:
+        c = dict(V2_DEFAULTS)
+        rc = {}
+        for f in ("bar_chart", "scatter_plot"):
+            rc.update(man.get((q, f), {}).get("renderer_constants") or {})
+        for k in c:
+            if k in rc:
+                c[k] = rc[k]
+        const_src[tuple(sorted((k, str(c[k])) for k in c))] += 1
+        const_by_q[q] = c
+
+    # ---- predictions
+    v1rows, st1 = dedupe(read_jsonl(a.v1))
+    raw2 = []
+    for p in shard_paths:
+        raw2.extend(read_jsonl(p))
+    v2rows, st2 = dedupe(raw2)
+    v2rows = {k: v for k, v in v2rows.items() if k[0] in meta}
+    noimg_rows, st0 = dedupe(read_jsonl(noimg_path)) if os.path.exists(noimg_path) else ({}, {})
+    assist_rows, sta = (dedupe(read_jsonl(assist_path)) if os.path.exists(assist_path)
+                        else ({}, {}))
+    EM1, P1 = em_table(v1rows)
+    EM2, P2 = em_table(v2rows)
+    EM0 = {q: float(r.get("exact_match", 0) or 0) for (q, f), r in noimg_rows.items()}
+    EMa, _ = em_table({k: v for k, v in assist_rows.items() if k[1] in ASSIST})
+
+    exp_v2 = Counter(f for (_, f) in man)
+    got_v2 = Counter(f for (_, f) in v2rows)
+    print(f"v2 shard files: {len(shard_paths)} ({', '.join(os.path.basename(p) for p in shard_paths)})")
+    print(f"dedupe v1 {st1}\n       v2 {st2}\n       noimage {st0}\n       assist {sta}")
+    print("v2 coverage per format (rows kept / manifest rows): "
+          + ", ".join(f"{f} {got_v2[f]}/{exp_v2[f]}" for f in sorted(exp_v2)))
+    unknown = sorted(set(got_v2) - set(exp_v2))
+    if unknown:
+        print(f"  WARN v2 viz types not in manifest: {unknown}")
+    print("tabular renderer constants used (question counts): "
+          + "; ".join(f"{dict(k)} x{v}" for k, v in const_src.items()))
+
+    # ---- categories
+    cat1, cat2 = {}, {}
+    for q, r in meta.items():
+        cat1[q] = ans.CLASSIFY[r["modality"]](r)
+        cat2[q] = classify_v2(r, const_by_q.get(q, V2_DEFAULTS))
+    print("\n[v2 rule branches] (question counts)")
+    for k in sorted(BRANCH):
+        if k.startswith("v2"):
+            print(f"  {BRANCH[k]:5d}  {k}")
+
+    res = {"config": {"seed": SEED, "B_boot": B_BOOT, "B_perm": B_PERM, "smoke": a.smoke,
+                      "v2_shards": [os.path.relpath(p, ROOT) if p.startswith(ROOT) else p
+                                    for p in shard_paths],
+                      "dedupe": {"v1": st1, "v2": st2, "noimage": st0, "assist": sta},
+                      "v2_coverage": {f: [got_v2[f], exp_v2[f]] for f in exp_v2},
+                      "v2_branches": {k: v for k, v in BRANCH.items() if k.startswith("v2")}}}
+    res["1_categories"] = s1_categories(meta, cat1, cat2, qs_by_mod)
+    res["2_per_format"] = s2_per_format(EM1, EM2, qs_by_mod, q2d)
+    res["3_gaps"] = s3_gaps(EM1, EM2, cat1, cat2, qs_by_mod, q2d)
+    res["4_flip_cr"] = s4_flip(EM1, P1, EM2, P2, qs_by_mod, q2d)
+    res["5_noimage"] = s5_noimage(EM0, EM2, meta, qs_by_mod, q2d)
+    res["6_assist"] = s6_assist(EMa, meta, q2d)
+    res["7_degree"] = s7_degree(EM2, meta, qs_by_mod, q2d)
+    res["8_cost"] = s8_cost(v2rows, man, noimg_rows)
+
+    with open(out_path, "w") as fh:
+        json.dump(res, fh, indent=1, default=float)
+    print(f"\nwrote {os.path.relpath(out_path, ROOT) if out_path.startswith(ROOT) else out_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
