@@ -16,3 +16,21 @@ python scripts/mitigation/stats_lora.py --records records.jsonl   # paired boots
 ```
 
 Weights will be published with the camera-ready version.
+
+## λ=0 control
+
+`consistency_lora_mm_lambda0/adapter_config.json` is the configuration of the control run
+reported alongside it in the paper: identical data, schedule, and seed, with
+`--lambda_consistency 0`. Reproduce both, then compare, with:
+
+```bash
+scripts/mitigation/run_lambda0_control.sh
+```
+
+The per-question records for base, λ=0 and λ=1 (`scripts/mitigation/*_records_*.jsonl`) are
+released so the paired statistics in the paper can be recomputed without a GPU:
+
+```bash
+python scripts/mitigation/stats_lora.py --base scripts/mitigation/after_records_lambda0.jsonl \
+    --after scripts/mitigation/after_records_full.jsonl --B 5000
+```
