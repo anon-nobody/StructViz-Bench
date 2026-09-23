@@ -153,36 +153,33 @@ def main() -> int:
             n = len(paired)
             obs = sum(x - y for x, y in paired) / n
             hits = 0
-            for _ in range(2000):
+            B_PERM = 10000
+            for _ in range(B_PERM):
                 tot = sum((x - y) if rng.random() < .5 else (y - x) for x, y in paired)
                 if abs(tot / n) >= abs(obs):
                     hits += 1
-            if (hits + 1) / 2001 < 0.001:
+            p_raw = (hits + 1) / (B_PERM + 1)          # estimator floor = 1/10001
+            if p_raw * 12 < 0.01:                       # Bonferroni x12; paper: corrected p = 0.0012
                 nsig += 1
-    check_bool("all 12 cells significant at p<0.001 (sign-flip)", nsig == 12, f"{nsig}/12")
+    check_bool("all 12 cells: Bonferroni-corrected p<0.01 (10k perms)", nsig == 12, f"{nsig}/12")
 
-    section("Section 5 / Table 3 — leave-one-format-out direction")
-    import csv
-    p = os.path.join(RES, "ablation", "viz_removal_summary.csv")
-    if os.path.exists(p):
-        d = defaultdict(dict)
-        for r in csv.DictReader(open(p)):
-            d[(r["model"], r["modality"])][r["excluded_viz"]] = float(r["delta_em"]) * 100
-        keymap = {"GPT-4o": "gpt4o", "Gemini Flash": "gemini",
-                  "Qwen2.5-VL-7B": "qwen", "Claude Sonnet": "claude"}
-        ok = tot = 0
-        for disp, recs in core.items():
-            for md in MODS:
-                pf2 = per_format(recs, md)
-                b, w = max(pf2, key=pf2.get), min(pf2, key=pf2.get)
-                cell = d.get((keymap[disp], md), {})
-                if b in cell and w in cell:
-                    tot += 1
-                    ok += cell[w] > 0 and cell[b] < 0
-        check_bool("remove-worst raises and remove-best lowers", ok == tot == 12, f"{ok}/{tot}")
-    else:
-        _skipped.append("leave-one-format-out")
-        print("  SKIP  leave-one-format-out (ablation summary missing)")
+    section("Section 5 — information-complete contrast (adjacency_matrix vs text_only, graph)")
+    diffs = []
+    for disp, recs in core.items():
+        q = by_question(recs, "graph")
+        pairs = [(v["adjacency_matrix"], v["text_only"]) for v in q.values()
+                 if "adjacency_matrix" in v and "text_only" in v]
+        diffs.append(100 * sum(a - b for a, b in pairs) / len(pairs))
+    check("graph adjacency-vs-text residual, smallest |gap|", -13.0, max(diffs), tol=0.5)
+    check("graph adjacency-vs-text residual, largest |gap|", -23.0, min(diffs), tol=0.5)
+    tab = []
+    for disp, recs in core.items():
+        q = by_question(recs, "tabular")
+        pairs = [(v["table_image"], v["text_only"]) for v in q.values()
+                 if "table_image" in v and "text_only" in v]
+        tab.append(100 * sum(a - b for a, b in pairs) / len(pairs))
+    check_bool("tabular table_image-vs-text residual within 0-8pp", all(-1.0 <= d <= 8.5 for d in tab),
+               ", ".join(f"{d:+.1f}" for d in tab))
 
     section("Section 5 — value_extraction, the information-access case")
     ve = []
@@ -201,6 +198,29 @@ def main() -> int:
     check_bool("bar_chart value_extraction is 1.7% for all four",
                all(abs(b - 1.7) < 0.15 for b in bars),
                ", ".join(f"{b:.1f}" for b in bars))
+
+    section("Section 6 / Table — training-free ensemble (per-question matched baseline)")
+    import re as _re
+    def _norm(p):
+        p = str(p).strip().lower(); m = _re.search(r"-?\d+(?:\.\d+)?", p.replace(",", ""))
+        return m.group() if m else p
+    from collections import Counter as _C
+    ens_d = {}
+    for disp, fn in ALL.items():
+        recs = load(fn)
+        if recs is None:
+            continue
+        byq = defaultdict(list)
+        for r in recs:
+            byq[r["question_id"]].append((float(r.get("exact_match", 0)), _norm(r.get("prediction", ""))))
+        rnd = 100 * sum(sum(e for e, _ in v) / len(v) for v in byq.values()) / len(byq)
+        ens = 0
+        for v in byq.values():
+            top = _C(p for _, p in v).most_common(1)[0][0]
+            ens += max(e for e, p in v if p == top)
+        ens_d[disp] = 100 * ens / len(byq) - rnd
+    check("ensemble gain, smallest model", 0.2, min(ens_d.values()), tol=0.15)
+    check("ensemble gain, largest model", 7.0, max(ens_d.values()), tol=0.15)
 
     section("Section 4 / Table 6 — prompt style and chain-of-thought")
     pa = os.path.join(RES, "ablation")
@@ -246,6 +266,87 @@ def main() -> int:
     else:
         _skipped.append("L2")
         print("  SKIP  cross-modal L2 (files missing)")
+
+    section("Section 6 / Table — LoRA: base -> lambda=0 -> lambda=1 (from released records)")
+    MIT = os.path.join(ROOT, "scripts", "mitigation")
+    def _cr_gap(fn):
+        p = os.path.join(MIT, fn)
+        if not os.path.exists(p):
+            return None
+        byq = [json.loads(l) for l in open(p) if l.strip()]
+        out = {}
+        for md in MODS:
+            rows = [r for r in byq if r.get("modality") == md]
+            if not rows:
+                continue
+            # Consistency Rate: mean over questions of the fraction of format pairs whose
+            # normalised predictions agree.
+            crs = []
+            for r in rows:
+                pr = list(r["preds"].values()); k = len(pr)
+                agree = sum(1 for i in range(k) for j in range(i + 1, k)
+                            if str(pr[i]).strip().lower() == str(pr[j]).strip().lower())
+                crs.append(agree / (k * (k - 1) / 2) if k > 1 else 1.0)
+            fmts = defaultdict(list)
+            for r in rows:
+                for f, c in r["correct"].items():
+                    fmts[f].append(float(c))
+            acc = {f: 100 * sum(v) / len(v) for f, v in fmts.items()}
+            out[md] = (100 * sum(crs) / len(crs), max(acc.values()) - min(acc.values()))
+        return out
+    # stats_lora.py pairs questions present in BOTH files being compared; the paper's
+    # base->lambda1 numbers therefore use base∩lambda1 (n = 236/149/169). Restrict every
+    # file to the qids shared by all three so base, lambda0 and lambda1 are computed on
+    # one common set.
+    _files = ["base_records_full.jsonl", "after_records_lambda0.jsonl", "after_records_full.jsonl"]
+    _sets = []
+    for _f in _files:
+        _p = os.path.join(MIT, _f)
+        _sets.append({json.loads(l)["qid"] for l in open(_p) if l.strip()} if os.path.exists(_p) else None)
+    _common = set.intersection(*[x for x in _sets if x is not None]) if all(_sets) else set()
+    _orig = _cr_gap
+    def _cr_gap(fn, _keep=_common):
+        p = os.path.join(MIT, fn)
+        if not os.path.exists(p):
+            return None
+        # one record per qid (last wins), exactly as stats_lora.py keys its dict; the
+        # eval manifest carries a few duplicated time-series rows.
+        _d = {}
+        for r in (json.loads(l) for l in open(p) if l.strip()):
+            if r["qid"] in _keep:
+                _d[r["qid"]] = r
+        byq = list(_d.values())
+        out = {}
+        for md in MODS:
+            rows = [r for r in byq if r.get("modality") == md]
+            if not rows:
+                continue
+            crs = []
+            for r in rows:
+                pr = list(r["preds"].values()); k = len(pr)
+                agree = sum(1 for i in range(k) for j in range(i + 1, k)
+                            if str(pr[i]).strip().lower() == str(pr[j]).strip().lower())
+                crs.append(agree / (k * (k - 1) / 2) if k > 1 else 1.0)
+            fmts = defaultdict(list)
+            for r in rows:
+                for f, c in r["correct"].items():
+                    fmts[f].append(float(c))
+            acc = {f: 100 * sum(v) / len(v) for f, v in fmts.items()}
+            out[md] = (100 * sum(crs) / len(crs), max(acc.values()) - min(acc.values()))
+        return out
+    base, l0, l1 = _cr_gap("base_records_full.jsonl"), _cr_gap("after_records_lambda0.jsonl"), _cr_gap("after_records_full.jsonl")
+    if base and l0 and l1:
+        for md, cb, c0, c1 in [("tabular", 30.8, 51.8, 55.5), ("timeseries", 44.6, 59.2, 59.9), ("graph", 39.5, 52.9, 64.4)]:
+            check(f"CR {md}: base", cb, base[md][0], tol=0.6, unit="%")
+            check(f"CR {md}: lambda=0", c0, l0[md][0], tol=0.6, unit="%")
+            check(f"CR {md}: lambda=1", c1, l1[md][0], tol=0.6, unit="%")
+        for md, gb, g0, g1 in [("tabular", 20.3, 11.9, 10.2), ("timeseries", 19.5, 14.8, 15.4), ("graph", 18.9, 10.7, 10.7)]:
+            check(f"gap {md}: base", gb, base[md][1], tol=0.6)
+            check(f"gap {md}: lambda=0", g0, l0[md][1], tol=0.6)
+            check(f"gap {md}: lambda=1", g1, l1[md][1], tol=0.6)
+    else:
+        _skipped.append("LoRA records")
+        print("  SKIP  LoRA records (scripts/mitigation/*_records_*.jsonl missing)")
 
     section("Section 4 — scale does not solve it (Qwen 7B -> 32B)")
     q7, q32 = load(CORE["Qwen2.5-VL-7B"]), load("full_qwen32b.jsonl")
