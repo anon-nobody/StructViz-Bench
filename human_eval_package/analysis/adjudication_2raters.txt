@@ -1,0 +1,105 @@
+item  mod  task  viz | A1 A2 | GT_full_ok | truncated-view answer | equals GT? | note
+H000 tab value_extraction table_image  | Cor Amb | True | A                                  | True | 'patient_group'과 week의 경계가 모호하여 해석이 나뉠 수
+H001 tab ranking          scatter_plot | Inc Amb | True | (first two numeric cols only)      | None | line_b 라는 변수명을 차트만 보고 알 수 없음
+H002 tab comparison       heatmap      | Cor Cor | True | no2                                | True | 
+H003 tim pattern_label_lo line_plot    | Inc Cor | None | None                               | None | 차트만 보고 linear_trend라는 레이블을 알 수 없음
+H004 gra degree_query     node_link    | Inc Amb | None | None                               | None | 차트에는 노드 번호도 없고 계산으 어려움
+H005 tim normalized_ampli heatmap      | Inc Amb | None | None                               | None | 차트 시각화 결과만으로는 판단하기 어려워 보임.
+H006 gra centrality       node_link    | Inc Amb | None | None                               | None | 노드의 번호가 없어서 분별할 수 없음.
+H007 gra centrality       text_only    | Amb Inc | None | (first 43 edges visible)           | None | 전체 내용이 아니라 일부 내용만 보여져서 답을 찾기 어려움.
+H008 tim range_query      gaf          | Inc Inc | None | None                               | None | 차트만 보고 값들의 범위를 알기 어려움.
+H009 tim median_mean_rela gaf          | Inc Cor | None | None                               | None | GAF 결과만 가지고는 중앙값이 전체 평균 위인지 아래인지 판단하기 어려
+H010 tim range_query      heatmap      | Amb Amb | None | None                               | None | 차트에 주어진 color bar의 Value의 값을 기준으로 대략적인 범
+H011 gra connectivity     circular_lay | Inc Inc | None | None                               | None | 노드 번호가 차트에 없어서 판단하기 어려움.
+H012 tim counterfactual_s text_only    | Cor Cor | None | (first 43 points visible)          | None | 
+H013 gra counterfactual   adjacency_ma | Cor Cor | None | None                               | None | 
+H014 tim peak_trough_orde text_only    | Cor Cor | None | (first 43 points visible)          | None | 
+H015 gra degree_query     adjacency_ma | Cor Cor | None | None                               | None | 
+H016 tim value_lookup     gaf          | Inc Inc | None | None                               | None | GAF 값만 가지고 첫번째 값을 알기에는 어려움.
+H017 tab ranking          scatter_plot | Inc Inc | True | (first two numeric cols only)      | None | midscale이라는 항목을 차트상에서는 볼 수 없음
+H018 tim oscillation_coun line_plot    | Cor Cor | None | None                               | None | 
+H019 tim peak_trough_orde line_plot    | Cor Cor | None | None                               | None | 
+H020 tab aggregation      bar_chart    | Inc Inc | True | (column means only)                | None | 차트 상의 평균값만 보고 합계를 알기는 어려움.
+H021 gra community        node_link    | Cor Cor | None | None                               | None | 차트만으로는 구분이 어려워 보인다.
+H022 tab counterfactual   bar_chart    | Cor Cor | True | (column means only)                | None | 
+H023 tim volatility       line_plot    | Cor Amb | None | None                               | None | 그래프를 하나하나 자세히 해석한다면 정답이 후반부 임을 유추할 수 있지만
+H024 gra cycle_detection  adjacency_ma | Cor Cor | None | None                               | None | 
+H025 tab aggregation      text_only    | Cor Amb | True | 2.37                               | True | 7번째와 8번째 값의 평균을 소수점 2자리로 반올림 하면 2.37이다. 
+H026 tab trend_analysis   scatter_plot | Inc Inc | True | (first two numeric cols only)      | None | 차트만 보고 판별하기는 어렵다.
+H027 gra connectivity     circular_lay | Inc Inc | None | None                               | None | 차트만에는 노드 번호가 없어서 답을 하기 어렵다.
+H028 gra connectivity     text_only    | Inc Cor | None | None                               | None | 
+H029 gra counterfactual   node_link    | Cor Inc | None | None                               | None | 노드 0과 83이 차트상으로는 어떤건지 알 수 없어서 판단하기 어려움.
+H030 tab aggregation      heatmap      | Cor Cor | True | None                               | None | 
+H031 tim half_change_inte recurrence_p | Inc Inc | None | None                               | None | 차트만 가지고는 해석하기 어려움.
+H032 tab ranking          text_only    | Inc Inc | True | line_c                             | False | 'line' 중 'units_produced' 값이 가장 높은 항목은 l
+H033 tim forecasting      line_plot    | Inc Amb | None | None                               | None | 예상값을 차트만 보고 예측하기는 어려움.
+H034 tim median_mean_rela recurrence_p | Inc Amb | None | None                               | None | 차트만 보고 중앙값이 전체 평균보다 위인지 아래인지 구분이 어려움.
+H035 gra connectivity     circular_lay | Inc Inc | None | None                               | None | 노드 번호도 없는 차트만 보고는 답을 내기 어려움.
+H036 tab ranking          heatmap      | Inc Inc | True | None                               | None | 가장 높은 값이 60.10인건 판별되지만, 항목명이 없어 lynx라고 맞
+H037 gra shortest_path    adjacency_ma | Cor Cor | None | None                               | None | 
+H038 tab filtering        heatmap      | Inc Inc | True | 10                                 | False | ozone 값 26.77보다 큰 행은 10개이다.
+H039 gra degree_query     circular_lay | Inc Inc | None | None                               | None | 차트 상으로는 노드 번호가 없어서 차수 계산이 어렵다.
+H040 tab ranking          bar_chart    | Inc Inc | True | (column means only)                | None | 평균을 나타내는 차트만 보고는 discount_usd 값이 가장 높은 항
+H041 gra degree_query     text_only    | Inc Inc | None | (first 43 edges visible)           | None | 전체 View 잘린 것 같지만 보이는 View에 있는 것만 가지고 2E/
+H042 gra degree_query     node_link    | Amb Amb | None | None                               | None | 노드끼리 너무 겹쳐져서 간선이 보이지 않는다.
+H043 tab outlier_detectio table_image  | Inc Cor | True | luxury                             | True | 꼭 그렇게 보이지는 않는다.
+H044 tab counterfactual   scatter_plot | Inc Inc | False | (first two numeric cols only)      | None | 차트상으로는 rainfall_mm은 보이지만, fertilizer_kg는
+H045 gra connectivity     node_link    | Inc Inc | None | None                               | None | 노드 번호가 없어서 구분이 안된다.
+H046 tab outlier_detectio table_image  | Inc Inc | True | D2                                 | False | household_size 평균은 3.07818이고, 가장 벗어난 dis
+H047 tab outlier_detectio bar_chart    | Inc Inc | True | (column means only)                | None | 차트만으로는 school 항목이 보이지 않는다.
+H048 tab correlation      scatter_plot | Inc Cor | True | (first two numeric cols only)      | None | 차트에서 'goals_against'는 보이지만, 'possession_
+H049 gra degree_query     text_only    | Cor Amb | None | (first 43 edges visible)           | None | 8 -- 28을 보면 degree(v)가 6인 것을 확인할 수 있다. 제
+H050 gra degree_query     adjacency_ma | Cor Cor | None | None                               | None | 
+H051 tim oscillation_coun gaf          | Inc Inc | None | None                               | None | GAF 차트만으로는 알기 어려움.
+H052 gra community        node_link    | Inc Inc | None | None                               | None | 노드들이 겹쳐서 판단하기 어려움
+H053 tab ranking          table_image  | Cor Amb | True | CRX                                | True | 구분선이 모호하여 CRX 2023으로 해석하는 경우도 있을 듯 하다.
+H054 tim peak_trough_orde gaf          | Inc Inc | None | None                               | None | 이 차트만 보고는 알기 어려움
+H055 tim value_lookup     heatmap      | Inc Amb | None | None                               | None | 이 차트의 색만 가지고는 정답을 알기 어려움
+H056 tim split_trend_cons heatmap      | Cor Cor | None | None                               | None | 
+H057 gra bipartite_check  node_link    | Cor Inc | None | None                               | None | 간선들이 겹쳐있어 구분이 불가능 하다.
+H058 gra counterfactual   text_only    | Cor Cor | None | None                               | None | 
+H059 tab correlation      heatmap      | Inc Inc | True | None                               | None | 차트로 보이는 것 만으로는 구분하기 어려움.
+H060 tab value_extraction scatter_plot | Inc Inc | False | (first two numeric cols only)      | None | 이 차트만 가지고는 판단하기 어려움.
+H061 tab counterfactual   bar_chart    | Cor Cor | False | (column means only)                | None | 
+H062 tim counterfactual_s recurrence_p | Cor Cor | None | None                               | None | 
+H063 tab counterfactual   text_only    | Cor Cor | True | yes                                | True | 
+H064 tim counterfactual_s line_plot    | Cor Cor | None | None                               | None | 
+H065 tab counterfactual   bar_chart    | Cor Cor | True | (column means only)                | None | 
+H066 tab aggregation      table_image  | Inc Inc | True | 1079.44                            | False | 계산하면 합은 1,079.44이라서 틀렸어.
+H067 gra bipartite_check  circular_lay | Cor Cor | None | None                               | None | 
+H068 tim mean_shift_magni recurrence_p | Inc Inc | None | None                               | None | 이 차트만으로는 구분하기 어려움.
+H069 tim volatility       heatmap      | Cor Amb | None | None                               | None | 전반부와 후반부의 변동성 정도가 직관적이지 않아 다른 판단을 하는 경우도
+H070 gra counterfactual   text_only    | Cor Cor | None | (first 43 edges visible)           | None | 
+H071 gra degree_query     circular_lay | Inc Amb | None | None                               | None | 노드 번호가 없어서 차트만 가지고 분석할 수 없음.
+H072 gra diameter         circular_lay | Inc Amb | None | None                               | None | 차트만 가지고는 구분하기 어려움
+H073 tab outlier_detectio bar_chart    | Inc Inc | True | (column means only)                | None | city 항목을 차트만으로는 알 수 없어서 답을 제시하기 어려움.
+H074 tim counterfactual_h heatmap      | Cor Inc | None | None                               | None | 정확한 수치값을 알 수 없어 불가능하다.
+H075 tim counterfactual_s text_only    | Cor Cor | None | (first 43 points visible)          | None | 
+H076 tab ranking          table_image  | Inc Amb | True | lynx                               | False | goals_against 값이 낮은 team은 lynx와 rangers 
+H077 tim half_change_inte heatmap      | Amb Inc | None | None                               | None | 차트만 보고는 구분하기 어려움.
+H078 tab counterfactual   text_only    | Inc Inc | True | yes                                | True | units_produced 값이 상대적으로 더 높음.
+H079 gra centrality       text_only    | Cor Amb | None | None                               | None | 4번과 6번이 동일하기 때문에 둘 중 어느 것을 고르느냐에 따라 해석이 
+H080 tim counterfactual_h recurrence_p | Cor Inc | None | None                               | None | 해당 plot 내부에 존재하는 실제 값의 크기 분포를 알 수 없으므로 5
+H081 tab filtering        table_image  | Inc Inc | True | 3                                  | False | 엄격히 큰 행은 3개
+H082 tab filtering        heatmap      | Cor Amb | True | None                               | None | 'units_in_stock' 값이 758.3보다 큰 행은 10개. "엄
+H083 tim seasonality_dete text_only    | Cor Cor | None | (first 43 points visible)          | None | 
+H084 gra counterfactual   adjacency_ma | Cor Cor | None | None                               | None | 
+H085 gra centrality       adjacency_ma | Inc Cor | None | None                               | None | 계산하기 어렵다.
+H086 tim change_point     line_plot    | Cor Amb | None | None                               | None | 변화율이 극단적으로 바뀌는 구간 없이 구간 변화율이 거의 일정하기 때문에
+H087 tab aggregation      scatter_plot | Amb Amb | True | (first two numeric cols only)      | None | 대략적인 평균은 알 수 있지만, 차트만 보고 정확한 평균을 알기는 어렵다
+H088 tim anomaly_detectio recurrence_p | Amb Inc | None | None                               | None | 차트로만 정확한 이상 시점을 찾기는 어려움.
+H089 gra counterfactual   adjacency_ma | Cor Cor | None | None                               | None | 
+H090 tim counterfactual_s gaf          | Cor Cor | None | None                               | None | 
+H091 tab correlation      heatmap      | Cor Amb | True | None                               | None | 미세하게 상관이 있을 수 있으나 이미지만으로는 알 수 없다.
+H092 tab ranking          text_only    | Inc Inc | True | north_grid                         | False | spot_price_usd 값 중 가장 높은 값은 87.080이고, zo
+H093 tim change_point     text_only    | Cor Amb | None | (first 43 points visible)          | None | 변화율이 일정하고 미미하지만 "유의미"의 기준을 어떻게 두느냐에 따라 해
+H094 tab filtering        text_only    | Inc Inc | True | 7                                  | False | 13.85 값보다 큰 행은 8개임.
+H095 gra community        adjacency_ma | Amb Cor | None | None                               | None | 차트만 가지고 판단하기 어려움.
+H096 gra centrality       circular_lay | Inc Amb | None | None                               | None | 차트에는 노드 번호가 없어서 답을 찾기 어려움.
+H097 tim normalized_ampli gaf          | Inc Inc | None | None                               | None | GAF 차트만 가지고는 답을 찾기 어려움.
+H098 tim counterfactual_h text_only    | Cor Inc | None | (first 43 points visible)          | None | 전반부 평균 = 110.82
+후반부 평균 = 107.3756
+후반부 평균
+H099 gra degree_query     text_only    | Cor Inc | None | (first 43 edges visible)           | None | 전체 자료가 보이지않는다. 노드4 이후의 노드가 보이지 않아 판별이 불가
+
+SUMMARY {('GTfull_ok', 'trunc_same'): 7, ('GTfull_ok', 'n/a'): 82, ('GTfull_ok', 'trunc_changes_answer'): 8, ('GT_FULL_MISMATCH', 'n/a'): 3}
