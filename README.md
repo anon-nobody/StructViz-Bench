@@ -1,12 +1,11 @@
 # StructViz-Bench
 
-A Controlled Study of Visualization-Format Dependence in MLLM Reasoning over Structured Data
-
-> Anonymized artifact for double-blind review. Dataset and repository links are withheld until camera-ready.
+A Unified Benchmark for Evaluating MLLM Reasoning over Visualized Structured Data
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Dataset](https://img.shields.io/badge/🤗%20Dataset-StructViz--Bench-yellow)](https://huggingface.co/datasets/EvalData/StructViz-Bench)
 
-StructViz-Bench is a unified benchmark for systematically evaluating how visualization format affects MLLM reasoning across tabular, time-series, and graph data. By keeping underlying data and question semantics fixed while varying the visual representation, it enables direct measurement of visualization sensitivity across 14 visualization types and 73,260 evaluated instances.
+StructViz-Bench is a unified benchmark for systematically evaluating how visualization format affects MLLM reasoning across tabular, time-series, and graph data. By keeping underlying data and question semantics fixed while varying the visual representation, it enables direct measurement of visualization sensitivity across 14 visualization types (18,315 rendered instances per model; seven models in the paper).
 
 ## Key Results
 
@@ -31,9 +30,9 @@ StructViz-Bench is a unified benchmark for systematically evaluating how visuali
 
 | Experiment | Description | Status |
 |---|---|---|
-| Viz-Removal Ablation | Leave-one-out analysis of 14 visualization types | Complete (56 conditions) |
+| Viz-Removal Ablation | Leave-one-out pooling analysis | Run, but not used in the paper (the pooled mean rises by construction when the worst format is removed) |
 | Prompt Sensitivity | 4 prompt variants (concise, detailed, CoT, minimal) | Complete |
-| Mixed-Type (Level 2) | Cross-modal composite evaluation (600 items) | Complete |
+| Mixed-Type (Level 2) | Cross-modal pilot: one (table, series, graph) triple, 30 unique problems, 600 item ids (15–25 repeats each) | Pilot only; no significance claims |
 
 
 ## Benchmark Structure
@@ -57,7 +56,7 @@ StructViz-Bench
 
 - **Total items:** 3,795
 - **Rendered instances per model:** 18,315
-- **Total evaluated:** 73,260
+- **Models in the paper:** 7 (GPT-4o, Gemini Flash, Gemini-2.5, Claude Sonnet, Qwen2.5-VL-7B/32B, InternVL2.5-8B); an eighth run (`results/full_llava.jsonl`, LLaVA-OneVision) is released but not used in the paper because it is degenerate: exact match is identical across all formats of every modality and the per-question flip rate is 0%, i.e. its outputs did not depend on the image
 
 ## Visualization Families
 
@@ -114,48 +113,28 @@ python scripts/run_ablation.py prompt-sensitivity \
 
 ```
 StructViz-Bench/
+├── AGENTS.md
 ├── README.md
-├── REPRODUCTION.md            # Step-by-step reproduction guide
-├── DATASET_CARD.md            # Dataset card
-├── HUMAN_EVAL_PROTOCOL.md     # Answer-legibility audit protocol
-├── LICENSE                    # Apache-2.0 (code); CC-BY-4.0 (data)
+├── REPRODUCTION.md          # Step-by-step reproduction guide
+├── DATASET_CARD.md          # HuggingFace dataset card
+├── LICENSE                  # Apache-2.0 (code); CC-BY-4.0 (data)
 ├── requirements.txt
-├── configs/                   # Experiment configurations
-├── benchmark/                 # Benchmark items
-├── results/                   # Evaluation outputs
-│   ├── full_*.jsonl           # Per-model predictions (reproduce the main tables)
-│   ├── ablation/              # Leave-one-format-out and prompt/CoT ablations
-│   └── mixed_*                # Cross-modal (Level 2) results
-├── scripts/                   # Runnable scripts
-│   └── mitigation/            # Ensemble, format selector, consistency-LoRA, probe
-├── human_eval_package/        # Self-contained annotation package (tool + sheets)
-├── checkpoints/               # LoRA config (weights at camera-ready)
-├── src/                       # Source modules
-└── tests/                     # Unit tests
+├── configs/                 # Experiment configurations
+├── data/                    # Benchmark data (generated)
+├── paper/                   # LaTeX source and figures
+├── results/                 # Evaluation outputs
+├── scripts/                 # All runnable scripts
+├── src/                     # Source modules
+└── tests/                   # Unit tests
 ```
-
-## For reviewers
-
-| Paper claim | Artifact |
-|---|---|
-| Per-format accuracy tables | `results/full_*.jsonl` |
-| Leave-one-format-out ablation | `results/ablation/viz_removal_summary.csv` |
-| Prompt-style and chain-of-thought ablation | `results/ablation/prompt_sensitivity_summary.csv` |
-| Cross-modal (Level 2) results | `results/mixed_analysis_summary.csv` |
-| Training-free ensemble / learned selector | `scripts/mitigation/tta_format_ensemble.py`, `format_selector.py` |
-| Consistency-regularized LoRA | `scripts/mitigation/train_consistency_lora.py`, `eval_lora.py`, `stats_lora.py` |
-| Attention probe (negative result) | `scripts/mitigation/attention_probe.py` |
-| Human-validation protocol | `human_eval_package/` |
 
 ## Citation
 
 ```bibtex
-@inproceedings{structvizbench2026,
-  title={StructViz-Bench: A Controlled Study of Visualization-Format Dependence in MLLM Reasoning over Structured Data
-
-> Anonymized artifact for double-blind review. Dataset and repository links are withheld until camera-ready.},
+@misc{structvizbench2026,
+  title={StructViz-Bench: A Controlled Study of Visualization-Format Dependence in Multimodal LLM Reasoning over Structured Data},
   author={Anonymous},
-  booktitle={Under review (venue anonymized)},
+  note={Under review},
   year={2026}
 }
 ```

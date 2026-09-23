@@ -86,10 +86,10 @@ Annotations (questions and answers) are automated using quality-validated templa
 ## Citation
 
 ```bibtex
-@inproceedings{structvizbench2026,
-  title={StructViz-Bench: A Unified Benchmark for Evaluating MLLM Reasoning over Visualized Structured Data},
+@misc{structvizbench2026,
+  title={StructViz-Bench: A Controlled Study of Visualization-Format Dependence in Multimodal LLM Reasoning over Structured Data},
   author={Anonymous},
-  booktitle={Under review (venue anonymized)},
+  note={Under review},
   year={2026}
 }
 ```

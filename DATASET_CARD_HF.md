@@ -51,8 +51,8 @@ dataset_info:
 
 ## Dataset Description
 
-- **Homepage:** withheld during double-blind review
-- **Repository:** this anonymized repository (permanent links added at camera-ready)
+- **Homepage:** [https://huggingface.co/datasets/EvalData/StructViz-Bench](https://huggingface.co/datasets/EvalData/StructViz-Bench)
+- **Repository (anonymized for review):** [https://anonymous.4open.science/r/StructViz-Bench](https://anonymous.4open.science/r/StructViz-Bench)
 - **Paper:** StructViz-Bench: A Unified Benchmark for Evaluating MLLM Reasoning over Visualized Structured Data
 - **Point of Contact:** Anonymous
 - **License:** CC-BY-4.0
@@ -189,10 +189,10 @@ This dataset is released under the [Creative Commons Attribution 4.0 Internation
 ### Citation Information
 
 ```bibtex
-@inproceedings{structvizbench2026,
-  title={StructViz-Bench: A Unified Benchmark for Evaluating MLLM Reasoning over Visualized Structured Data},
+@misc{structvizbench2026,
+  title={StructViz-Bench: A Controlled Study of Visualization-Format Dependence in Multimodal LLM Reasoning over Structured Data},
   author={Anonymous},
-  booktitle={Under review (venue anonymized)},
+  note={Under review},
   year={2026}
 }
 ```
@@ -209,7 +209,7 @@ This dataset is released under the [Creative Commons Attribution 4.0 Internation
 | Data modalities | 3 (tabular, timeseries, graph) |
 | Difficulty levels | 4 (1-hop, 2-hop, 3-hop, counterfactual) |
 | Rendered instances per model | 18,315 |
-| Total evaluated instances (4 models) | 73,260 |
+| Rendered instances per model | 18,315 (seven models reported in the paper) |
 | Task categories | 49 |
 
 ### Visualization Types

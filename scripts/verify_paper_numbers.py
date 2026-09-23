@@ -406,6 +406,60 @@ def main() -> int:
         _skipped.append("LoRA rescoring (benchmark file or records missing)")
         print("  SKIP  LoRA rescoring (benchmark/realworld_test.jsonl or records missing)")
 
+    section("Section 4 — question-only prior (in-sample), near-constant cells excluded, fixed-format reference")
+    if os.path.exists(_bp):
+        from collections import Counter as _C2
+        _b = [json.loads(l) for l in open(_bp) if l.strip()]
+        _g = defaultdict(_C2)
+        for r in _b:
+            _g[(r["modality"], r["task"])][str(r["answer"]).strip().lower()] += 1
+        _hit = defaultdict(int); _tot = defaultdict(int)
+        for (m, t), c in _g.items():
+            _hit[m] += c.most_common(1)[0][1]; _tot[m] += sum(c.values())
+        for m, stated in [("tabular", 25.3), ("timeseries", 42.9), ("graph", 42.6)]:
+            check(f"in-sample majority-answer prior, {m}", stated, 100 * _hit[m] / _tot[m], unit="%")
+        check("in-sample majority-answer prior, overall", 34.7, 100 * sum(_hit.values()) / sum(_tot.values()), unit="%")
+        _drop = {k for k, c in _g.items() if c.most_common(1)[0][1] / sum(c.values()) >= 0.9}
+        _task = {r["question_id"]: (r["modality"], r["task"]) for r in _b}
+        for disp, gaps in [("GPT-4o", (39.5, 22.0, 22.0)), ("Gemini Flash", (41.6, 17.0, 22.9)),
+                           ("Qwen2.5-VL-7B", (36.9, 14.0, 17.6)), ("Claude Sonnet", (31.6, 15.3, 16.0))]:
+            recs = [r for r in core[disp] if _task.get(r["question_id"]) not in _drop]
+            for md, stated in zip(MODS, gaps):
+                p = per_format(recs, md)
+                check(f"gap excl. near-constant cells, {disp} {md}", stated, max(p.values()) - min(p.values()))
+        # best fixed format per modality applied to all questions (in-sample), Table ensemble
+        for disp, stated in [("GPT-4o", 50.4), ("Gemini Flash", 51.7), ("Qwen2.5-VL-7B", 44.7), ("Claude Sonnet", 37.7)]:
+            recs = core[disp]; tot = 0.0; n = 0
+            for md in MODS:
+                p = per_format(recs, md); b = max(p, key=p.get)
+                sel = [float(r["exact_match"]) for r in recs if r["modality"] == md and r["viz_type"] == b]
+                tot += sum(sel); n += len(sel)
+            check(f"best fixed format per modality, all questions, {disp}", stated, 100 * tot / n, unit="%")
+
+    section("Section 5 — answerability audit (runs scripts/analysis/answerability.py)")
+    _ans = os.path.join(ROOT, "scripts", "analysis", "answerability.py")
+    _ansj = os.path.join(ROOT, "scripts", "analysis", "answerability_results.json")
+    if os.path.exists(_ans) and os.path.exists(_bp):
+        import subprocess
+        subprocess.run([sys.executable, _ans], cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    if os.path.exists(_ansj):
+        aj = json.load(open(_ansj))
+        fr = aj["category_fractions"]
+        for md, stated in [("tabular", 56.8), ("timeseries", 51.4), ("graph", 47.0)]:
+            got = fr[md]["A"] if isinstance(fr[md], dict) else None
+            if got is not None and got <= 1.0:
+                got = 100 * got
+            check(f"share of (question, format) pairs with answer absent, {md}", stated, got, unit="%")
+        ec = aj["em_by_category"]
+        check("bar_chart EM on answerable pairs, GPT-4o", 83.0, ec["GPT-4o|tabular"]["bar_chart"]["VD"]["em"], unit="%")
+        check("bar_chart EM on absent pairs, GPT-4o", 5.1, ec["GPT-4o|tabular"]["bar_chart"]["A"]["em"], unit="%")
+        check("bar_chart answerable pairs, n", 401, ec["GPT-4o|tabular"]["bar_chart"]["VD"]["n"], tol=0, unit="")
+        check("graph text_only EM on answerable pairs, Gemini", 78.1, ec["Gemini Flash|graph"]["text_only"]["VD"]["em"], unit="%")
+        check("gaf EM on answerable pairs, Claude", 4.7, ec["Claude Sonnet|timeseries"]["gaf"]["VD"]["em"], unit="%")
+    else:
+        _skipped.append("answerability audit")
+        print("  SKIP  answerability audit (script or results missing)")
+
     section("Section 5 — truncation subset and degree-annotation contrasts (point estimates)")
     if os.path.exists(_bp):
         meta = {}
@@ -448,6 +502,20 @@ def main() -> int:
         check("graph degree_query questions (text_only prints degrees)", 208,
               sum(1 for r in bench if r["modality"] == "graph" and r["task"] == "degree_query"), tol=0, unit="")
         qid2obj = {r["question_id"]: r["data_id"] for r in bench}
+        objs = set(qid2obj.values())
+        check("source objects (data_id)", 299, len(objs), tol=0, unit="")
+        check("questions per source object, mean", 12.7, len(bench) / len(objs), tol=0.05, unit="")
+        check("questions per source object, max", 25, max(__import__("collections").Counter(qid2obj.values()).values()), tol=0, unit="")
+        # near-constant templates: (modality, task) whose single most frequent answer covers >=90%
+        from collections import Counter as _C
+        _grp = defaultdict(_C)
+        for r in bench:
+            _grp[(r["modality"], r["task"])][str(r["answer"]).strip().lower()] += 1
+        _const = {k: sum(c.values()) for k, c in _grp.items() if c.most_common(1)[0][1] / sum(c.values()) >= 0.9}
+        check("near-constant (>=90% one answer) modality x task cells", 10, len(_const), tol=0, unit="")
+        check("questions in near-constant cells", 556, sum(_const.values()), tol=0, unit="")
+        check_bool("graph connectivity answers all 'yes'", _grp[("graph", "connectivity")].get("yes", 0) == 96, f"{_grp[('graph','connectivity')].get('yes',0)}/96")
+        check_bool("models reported in the paper: seven files present", all(os.path.exists(os.path.join(RES, v)) or os.path.exists(os.path.join(RES, v.replace('_extracted',''))) for v in ALL.values()), ", ".join(ALL))
         tr_p = os.path.join(ROOT, "scripts", "mitigation", "pairs_all_train.jsonl")
         ev_p = os.path.join(ROOT, "scripts", "mitigation", "pairs_all_eval.jsonl")
         if os.path.exists(tr_p) and os.path.exists(ev_p):
