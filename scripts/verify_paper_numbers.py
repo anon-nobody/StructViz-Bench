@@ -350,6 +350,39 @@ def main() -> int:
         _skipped.append("LoRA records")
         print("  SKIP  LoRA records (scripts/mitigation/*_records_*.jsonl missing)")
 
+    section("Appendix — learned selector on cross-modal (L2) questions")
+    import hashlib as _hl
+    def _l2_side(q): return "train" if int(_hl.md5(q.encode()).hexdigest(), 16) % 2 == 0 else "test"
+    l2sel = {}
+    for disp, short in keymap.items():
+        recs = load(f"mixed_{short}_extracted.jsonl")
+        if recs is None:
+            continue
+        byq = defaultdict(dict); tag = {}
+        for r in recs:
+            byq[r["question_id"]][r["viz_type"]] = float(r.get("exact_match", 0)); tag[r["question_id"]] = (r["modality"], r.get("task", "?"))
+        amt = defaultdict(lambda: defaultdict(list)); am = defaultdict(lambda: defaultdict(list))
+        for q, fm in byq.items():
+            if _l2_side(q) == "train":
+                for v, e in fm.items():
+                    amt[tag[q]][v].append(e); am[tag[q][0]][v].append(e)
+        bmt = {k: max(d, key=lambda v: sum(d[v]) / len(d[v])) for k, d in amt.items()}
+        bm = {k: max(d, key=lambda v: sum(d[v]) / len(d[v])) for k, d in am.items()}
+        n = smt = sm = 0
+        for q, fm in byq.items():
+            if _l2_side(q) != "test":
+                continue
+            mean = sum(fm.values()) / len(fm); n += 1
+            mt = bmt.get(tag[q]) or bm.get(tag[q][0]); m = bm.get(tag[q][0])
+            smt += fm.get(mt, mean); sm += fm.get(m, mean)
+        l2sel[disp] = 100 * (smt - sm) / n
+    if l2sel:
+        for disp, stated in [("GPT-4o", 5.7), ("Gemini Flash", 7.1), ("Qwen2.5-VL-7B", 9.6), ("Claude Sonnet", 0.0)]:
+            check(f"L2 selector gain over fixed pairing, {disp}", stated, l2sel.get(disp))
+    else:
+        _skipped.append("L2 selector")
+        print("  SKIP  L2 selector (mixed files missing)")
+
     section("Section 4 — scale does not solve it (Qwen 7B -> 32B)")
     q7, q32 = load(CORE["Qwen2.5-VL-7B"]), load("full_qwen32b.jsonl")
     if q32 is not None:
