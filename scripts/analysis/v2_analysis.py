@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import hashlib
 import json
 import os
 import random
@@ -66,6 +67,28 @@ V2_DEFAULTS = {"V2_BAR_ANNOTATE_MAX_ROWS": 35, "V2_BAR_MAX_PANELS": None,
 SCATTER_LABEL_MAX_CHARS = 8  # row_labels(df, max_chars=8) in tabular_scatter_plot
 
 BRANCH: Counter = Counter()
+
+# --strict-answerable: time-series tasks whose (numeric) answer must be read to exact-match
+# precision; any drawing without value annotations (line_plot, heatmap strip, gaf, recurrence
+# plot) becomes A for them. median_mean_relation / anomaly_detection count only when the
+# answer is numeric (every anomaly_detection answer is a timestep; median_mean_relation
+# answers are all non-numeric in realworld_test).
+TS_VALUE_PRECISE = {"value_lookup", "range_query", "threshold_count", "mean_shift_magnitude",
+                    "forecasting"}
+TS_VALUE_PRECISE_IF_NUMERIC = {"median_mean_relation", "anomaly_detection"}
+TS_DRAWINGS = ["line_plot", "heatmap", "gaf", "recurrence_plot"]
+TS_NONLOSSY = ["line_plot", "heatmap", "text_only"]
+
+# section 9 (hand-rule selector) inputs: v1 predictions of the 7 models used in cluster_cis.py
+SELECTOR_MODELS = {
+    "GPT-4o": "full_gpt4o_extracted.jsonl",
+    "Gemini Flash": "full_gemini_extracted.jsonl",
+    "Qwen2.5-VL-7B": "full_qwen_extracted.jsonl",
+    "Claude Sonnet": "full_claude_extracted.jsonl",
+    "Qwen2.5-VL-32B": "full_qwen32b.jsonl",
+    "InternVL2.5-8B": "full_internvl.jsonl",
+    "Gemini-2.5": "full_gemini25.jsonl",
+}
 
 
 # ---------------------------------------------------------------- loading helpers
@@ -115,6 +138,46 @@ def em_table(keyed):
         em[q][f] = float(r.get("exact_match", 0) or 0)
         pred[q][f] = r.get("prediction", "")
     return em, pred
+
+
+def is_numeric_str(s):
+    return re.fullmatch(r"\s*-?\d+(?:\.\d+)?\s*", str(s)) is not None
+
+
+def numerical_accuracy(pred, answer, abs_tol=0.05, rel_tol=0.01):
+    """Fallback copy of src.evaluation.metrics.numerical_accuracy (no answer extraction)."""
+    try:
+        pv, av = float(str(pred).strip()), float(str(answer).strip())
+    except ValueError:
+        return 0.0
+    d = abs(pv - av)
+    if d <= abs_tol:
+        return 1.0
+    den = max(abs(av), abs(pv))
+    return 1.0 if den > 0 and d / den <= rel_tol else 0.0
+
+
+def tol_table(keyed, meta):
+    """Tolerant score: numeric answers count as correct within abs 0.05 / rel 1% (the rows'
+    numeric_accuracy field when present), otherwise exact match."""
+    out = defaultdict(dict)
+    for (q, f), r in keyed.items():
+        em = float(r.get("exact_match", 0) or 0)
+        ansr = meta[q]["answer"] if q in meta else r.get("answer")
+        if is_numeric_str(ansr):
+            na = r.get("numeric_accuracy")
+            na = float(na) if na is not None else numerical_accuracy(r.get("prediction", ""),
+                                                                    ansr)
+            em = max(em, na)
+        out[q][f] = em
+    return out
+
+
+def load_near_constant():
+    """(modality, task) cells with one answer >= 90% (prior_and_subsets_results.json 1(c))."""
+    p = os.path.join(HERE, "prior_and_subsets_results.json")
+    d = json.load(open(p))
+    return {(c["modality"], c["task"]) for c in d["near_constant_tasks"]}
 
 
 def png_size(path):
@@ -364,6 +427,33 @@ def classify_v2(r, const):
     return classify_v2_graph(r)
 
 
+def strictify_v2(r, cats):
+    """--strict-answerable: V/D only if readable to exact-match precision.
+
+    tabular: scatter_plot shows row labels but no value annotations -> value_extraction A
+      (ranking / outlier_detection keep D when the label is readable; correlation keeps V);
+      bar_chart value_extraction is already V only when bars are annotated (<=35 rows).
+    timeseries: value-precise tasks (TS_VALUE_PRECISE, plus TS_VALUE_PRECISE_IF_NUMERIC with
+      a numeric answer) -> A in every drawing without annotations; text_only unchanged.
+    graph: unchanged (degree, shortest_path, diameter, edge_count, clustering are counting,
+      kept D).
+    """
+    out = dict(cats)
+    md, task = r["modality"], r["task"]
+    if md == "tabular" and task == "value_extraction" and out["scatter_plot"] in "VD":
+        out["scatter_plot"] = "A"
+        BRANCH["strict.tab scatter value_extraction -> A"] += 1
+    elif md == "timeseries":
+        vp = task in TS_VALUE_PRECISE or (task in TS_VALUE_PRECISE_IF_NUMERIC
+                                          and is_numeric_str(r["answer"]))
+        if vp:
+            changed = [f for f in TS_DRAWINGS if out[f] in "VD"]
+            for f in changed:
+                out[f] = "A"
+            BRANCH[f"strict.ts {task} drawings->A changed={','.join(changed) or '-'}"] += 1
+    return out
+
+
 # ---------------------------------------------------------------- per-question tables
 def complete(EM, qs, fmts):
     return [q for q in qs if q in EM and all(f in EM[q] for f in fmts)]
@@ -451,14 +541,9 @@ def s2_per_format(EM1, EM2, qs_by_mod, q2d):
     return out
 
 
-def s3_gaps(EM1, EM2, cat1, cat2, qs_by_mod, q2d):
-    section("3. Best-worst gap per modality (object sign-flip p, object-cluster CI)")
-    print(f"  {'sample':34s} {'best':>16s} {'worst':>16s} {'gap':>6s} {'obj CI':>15s} "
-          f"{'p_obj':>7s} {'n_q':>5s} {'nobj':>4s}")
-    out = {}
-    for md in MODS:
-        fm = FORMATS[md]
-        allq = qs_by_mod[md]
+def _gap_rows(EM1, EM2, cat1, cat2, md, allq, q2d):
+    fm = FORMATS[md]
+    if True:
         rec = {"v1_all": gap_block(EM1, allq, fm, q2d),
                "v2_all": gap_block(EM2, allq, fm, q2d)}
         # same questions for both suites (complete in v1 and v2)
@@ -474,27 +559,123 @@ def s3_gaps(EM1, EM2, cat1, cat2, qs_by_mod, q2d):
         rec["v1_on_v2_fully_answerable"] = gap_block(EM1, fa2, fm, q2d)
         rec["v1_fully_answerable_v1cats"] = gap_block(EM1, fa1, fm, q2d)
         rec["n_fully_answerable_v2"] = len(fa2)
+    return rec
+
+
+def s3_gaps(EM1, EM2, cat1, cat2, qs_by_mod, q2d, nc=None, meta=None):
+    section("3. Best-worst gap per modality (object sign-flip p, object-cluster CI)")
+    print(f"  {'sample':34s} {'best':>16s} {'worst':>16s} {'gap':>6s} {'obj CI':>15s} "
+          f"{'p_obj':>7s} {'n_q':>5s} {'nobj':>4s}")
+    out = {}
+    for md in MODS:
+        allq = qs_by_mod[md]
+        rec = _gap_rows(EM1, EM2, cat1, cat2, md, allq, q2d)
         print(f" {md}")
         for k, g in rec.items():
             if isinstance(g, dict):
                 print(gap_line(k, g))
+        if nc is not None:
+            allx = [q for q in allq if (md, meta[q]["task"]) not in nc]
+            recx = _gap_rows(EM1, EM2, cat1, cat2, md, allx, q2d)
+            print(f" {md}  [near-constant cells excluded: n_q {len(allx)}/{len(allq)}]")
+            for k, g in recx.items():
+                if isinstance(g, dict):
+                    print(gap_line(k, g))
+            rec["excl_near_constant"] = recx
         out[md] = rec
     print("\n  HEADLINE (same information, different rendering) = v2_fully_answerable rows: "
           "every main v2 format V or D, C questions excluded.")
     return out
 
 
-def s4_flip(EM1, P1, EM2, P2, qs_by_mod, q2d):
+def fa_counts(meta, cats_by_label, qs_by_mod, nc):
+    """All-answerable (every main format V/D) question counts per category set."""
+    print(f"  {'modality':10s} {'categories':10s} {'all q':>7s} {'excl NC':>8s} {'n_q':>5s} "
+          f"{'n_q excl NC':>11s}")
+    out = {}
+    for md in MODS:
+        allq = qs_by_mod[md]
+        allx = [q for q in allq if (md, meta[q]["task"]) not in nc]
+        for lab, cats in cats_by_label.items():
+            fa = [q for q in allq if all(cats[q][f] in "VD" for f in FORMATS[md])]
+            fax = [q for q in fa if (md, meta[q]["task"]) not in nc]
+            out[f"{md}|{lab}"] = {"all": len(fa), "excl_nc": len(fax), "n_q": len(allq),
+                                  "n_q_excl_nc": len(allx),
+                                  "tasks_excl_nc": dict(Counter(meta[q]["task"] for q in fax))}
+            print(f"  {md:10s} {lab:10s} {len(fa):7d} {len(fax):8d} {len(allq):5d} "
+                  f"{len(allx):11d}   tasks(excl NC) {out[f'{md}|{lab}']['tasks_excl_nc']}")
+    return out
+
+
+def s3b_identification(EM1, EM2, EMt1, EMt2, cat2, meta, qs_by_mod, q2d, nc, cat_label):
+    section(f"3b. Identification checks (categories: {cat_label}; NC = near-constant "
+            f"(modality, task) cells, one answer >= 90%)")
+    print(f"  {'sample':34s} {'best':>16s} {'worst':>16s} {'gap':>6s} {'obj CI':>15s} "
+          f"{'p_obj':>7s} {'n_q':>5s} {'nobj':>4s}")
+    out = {}
+    for md in MODS:
+        fm = FORMATS[md]
+        allq = qs_by_mod[md]
+        allx = [q for q in allq if (md, meta[q]["task"]) not in nc]
+        fa = [q for q in allq if all(cat2[q][f] in "VD" for f in fm)]
+        fax = [q for q in fa if (md, meta[q]["task"]) not in nc]
+        rec = {"v2_all_answerable": gap_block(EM2, fa, fm, q2d),
+               "v2_all_answerable_exclNC": gap_block(EM2, fax, fm, q2d),
+               "v1_on_v2_all_answerable_exclNC": gap_block(EM1, fax, fm, q2d)}
+        if md == "timeseries":
+            nl_fa = [q for q in allx if all(cat2[q][f] in "VD" for f in TS_NONLOSSY)]
+            rec["v2_nonlossy3_all_exclNC"] = gap_block(EM2, allx, TS_NONLOSSY, q2d)
+            rec["v2_nonlossy3_answerable_exclNC"] = gap_block(EM2, nl_fa, TS_NONLOSSY, q2d)
+            rec["v1_nonlossy3_all_exclNC"] = gap_block(EM1, allx, TS_NONLOSSY, q2d)
+            rec["v1_nonlossy3_answerable_exclNC"] = gap_block(EM1, nl_fa, TS_NONLOSSY, q2d)
+        if md == "tabular":
+            nve = [q for q in allx if meta[q]["task"] != "value_extraction"]
+            fax_nve = [q for q in fax if meta[q]["task"] != "value_extraction"]
+            rec["v2_all_exclNC_excl_value_extraction"] = gap_block(EM2, nve, fm, q2d)
+            rec["v2_all_answerable_exclNC_excl_value_extraction"] = gap_block(
+                EM2, fax_nve, fm, q2d)
+            rec["v2_tol1pct_all_exclNC"] = gap_block(EMt2, allx, fm, q2d)
+            rec["v2_tol1pct_all_answerable_exclNC"] = gap_block(EMt2, fax, fm, q2d)
+            rec["v2_tol1pct_all_exclNC_excl_value_extraction"] = gap_block(EMt2, nve, fm, q2d)
+            rec["v1_tol1pct_all_exclNC"] = gap_block(EMt1, allx, fm, q2d)
+        print(f" {md}  (n_q all {len(allq)}, excl NC {len(allx)}; all-answerable {len(fa)}, "
+              f"excl NC {len(fax)})")
+        for k, g in rec.items():
+            print(gap_line(k, g))
+        if md == "tabular":
+            for k in ("v2_tol1pct_all_exclNC", "v2_tol1pct_all_answerable_exclNC"):
+                g = rec[k]
+                if g.get("n_q"):
+                    print(f"    {k} per-format: " + "  ".join(
+                        f"{f} {f1(v)}" for f, v in g["per_format"].items()))
+        out[md] = rec
+    return out
+
+
+def s4_flip(EM1, P1, EM2, P2, qs_by_mod, q2d, nc=None, meta=None):
     section("4. Flip rate (% questions whose EM differs across formats) and Consistency Rate "
             "(mean share of agreeing format pairs), main formats")
     print(f"  {'modality':10s} {'sample':18s} {'flip v1':>7s} {'flip v2':>7s} {'d':>6s} "
           f"{'obj CI':>15s} {'CR v1':>6s} {'CR v2':>6s} {'d':>6s} {'obj CI':>15s} {'n_q':>5s}")
     out = {}
+    samples = [("", None)] + ([("excl-NC ", nc)] if nc is not None else [])
     for md in MODS:
-        fm = FORMATS[md]
+        for tag, ncs in samples:
+            qs = [q for q in qs_by_mod[md] if ncs is None or (md, meta[q]["task"]) not in ncs]
+            rec = _flip_block(EM1, P1, EM2, P2, md, qs, q2d, tag)
+            if ncs is None:
+                out[md] = rec
+            else:
+                out[md]["excl_near_constant"] = rec
+    return out
+
+
+def _flip_block(EM1, P1, EM2, P2, md, qs, q2d, tag):
+    fm = FORMATS[md]
+    if True:
         rec = {}
-        q1, fl1, cr1 = flip_cr(EM1, P1, qs_by_mod[md], fm)
-        q2, fl2, cr2 = flip_cr(EM2, P2, qs_by_mod[md], fm)
+        q1, fl1, cr1 = flip_cr(EM1, P1, qs, fm)
+        q2, fl2, cr2 = flip_cr(EM2, P2, qs, fm)
         rec["v1_all"] = {"n": len(q1), "flip": mean100(fl1), "cr": mean100(cr1)}
         rec["v2_all"] = {"n": len(q2), "flip": mean100(fl2), "cr": mean100(cr2)}
         common = sorted(set(q1) & set(q2))
@@ -509,16 +690,15 @@ def s4_flip(EM1, P1, EM2, P2, qs_by_mod, q2d):
                          "cr_v2": mean100([d2[q][1] for q in common]),
                          "flip_diff": df, "cr_diff": dc}
         p = rec["paired"]
-        print(f"  {md:10s} {'all (unpaired)':18s} {f1(rec['v1_all']['flip']):>7s} "
+        print(f"  {md:10s} {tag + 'all (unpaired)':18s} {f1(rec['v1_all']['flip']):>7s} "
               f"{f1(rec['v2_all']['flip']):>7s} {'':>6s} {'':>15s} {f1(rec['v1_all']['cr']):>6s} "
               f"{f1(rec['v2_all']['cr']):>6s} {'':>6s} {'':>15s} "
               f"{rec['v1_all']['n']:5d}/{rec['v2_all']['n']}")
-        print(f"  {md:10s} {'paired':18s} {f1(p['flip_v1']):>7s} {f1(p['flip_v2']):>7s} "
+        print(f"  {md:10s} {tag + 'paired':18s} {f1(p['flip_v1']):>7s} {f1(p['flip_v2']):>7s} "
               f"{pp(df['est']):>6s} {ci_str(df['obj_ci']):>15s} {f1(p['cr_v1']):>6s} "
               f"{f1(p['cr_v2']):>6s} {pp(dc['est']):>6s} {ci_str(dc['obj_ci']):>15s} "
               f"{len(common):5d}")
-        out[md] = rec
-    return out
+    return rec
 
 
 def load_prior():
@@ -588,6 +768,133 @@ def s5_noimage(EM0, EM2, meta, qs_by_mod, q2d):
                                        "task_majority_prior": task_prior[(md, t)]}
         print(f"            {md:10s} {t[:28]:28s} {f1(e):>6s} {f1(task_prior[(md, t)]):>7s} "
               f"{len(qs):4d}")
+    return out
+
+
+def s5b_cv_prior(EM2, qs_by_mod, q2d):
+    section("5b. v2 format EM vs the CROSS-VALIDATED majority prior "
+            "(prior_and_subsets_results.json prior_cv mean; prior treated as a constant)")
+    prior = load_prior()
+    out = {}
+    print(f"  {'modality':10s} {'format':16s} {'EM':>6s} {'EM obj CI':>15s} {'prior':>6s} "
+          f"{'EM-prior':>8s} {'CI of diff':>15s} {'n_q':>5s} {'nobj':>4s}  exceeds")
+    for md in MODS:
+        pv = prior[md]["cv_mean"] if prior else None
+        n_ex = 0
+        for f in FORMATS[md]:
+            qq = [q for q in qs_by_mod[md] if f in EM2.get(q, {})]
+            r = contrast([(q, EM2[q][f]) for q in qq], q2d)
+            c = r["obj_ci"]
+            ex = pv is not None and c["lo"] > pv
+            n_ex += ex
+            dci = ({"lo": c["lo"] - pv, "hi": c["hi"] - pv, "hw": c["hw"]} if pv is not None
+                   else c)
+            out[f"{md}|{f}"] = {"em": r["est"], "em_ci": c, "prior_cv": pv,
+                                "diff": r["est"] - pv if pv is not None else None,
+                                "diff_ci": dci, "n_q": r["n_units"], "n_obj": r["n_obj"],
+                                "exceeds": ex}
+            print(f"  {md:10s} {f:16s} {f1(r['est']):>6s} {ci_str(c):>15s} {f1(pv):>6s} "
+                  f"{pp(r['est'] - pv) if pv is not None else 'nan':>8s} {ci_str(dci):>15s} "
+                  f"{r['n_units']:5d} {r['n_obj']:4d}  {'YES' if ex else 'no'}")
+        out[f"{md}|n_exceeding"] = n_ex
+        print(f"  {md:10s} formats whose EM CI lies above the prior: {n_ex}/{len(FORMATS[md])}")
+    return out
+
+
+def _selector_eval(recs, q2d, meta, nc):
+    """Held-out comparison of random / fixed(mod) / hand rule / learned (mod, task) selector.
+
+    Split and learned selector as scripts/mitigation/format_selector_grouped.py (md5(data_id)
+    parity; best format per (modality, task), falling back to per-modality, learned on train;
+    a question lacking the chosen format scores its mean over formats). nc: excluded
+    (modality, task) cells, dropped from train and test.
+    """
+    byq = defaultdict(dict)
+    tag = {}
+    for r in recs:
+        q = r["question_id"]
+        byq[q][r["viz_type"]] = float(r.get("exact_match", 0) or 0)
+        tag[q] = (r["modality"], r.get("task", "?"))
+    if nc:
+        byq = {q: v for q, v in byq.items() if tag[q] not in nc}
+
+    def side(q):
+        did = q2d.get(q, q)
+        return "train" if int(hashlib.md5(did.encode()).hexdigest(), 16) % 2 == 0 else "test"
+
+    acc_mt = defaultdict(lambda: defaultdict(list))
+    acc_m = defaultdict(lambda: defaultdict(list))
+    for q, fm in byq.items():
+        if side(q) != "train":
+            continue
+        for v, e in fm.items():
+            acc_mt[tag[q]][v].append(e)
+            acc_m[tag[q][0]][v].append(e)
+    best_mt = {k: max(d, key=lambda v: sum(d[v]) / len(d[v])) for k, d in acc_mt.items()}
+    best_m = {k: max(d, key=lambda v: sum(d[v]) / len(d[v])) for k, d in acc_m.items()}
+
+    def rule(q):
+        md, task = tag[q]
+        if md == "tabular":
+            avg = "average" in re.sub(r"'[^']*'", "", meta[q]["question"]).lower()
+            if task == "comparison" or (task == "aggregation" and avg):
+                return "bar_chart"
+            return "table_image"
+        return "text_only"
+
+    vals = defaultdict(list)
+    d_sel_rule, d_rule_fix, d_rule_rand = [], [], []
+    n_rule_missing = 0
+    for q, fm in byq.items():
+        if side(q) != "test":
+            continue
+        mean = sum(fm.values()) / len(fm)
+        mt = best_mt.get(tag[q]) or best_m.get(tag[q][0])
+        s_sel = fm.get(mt, mean)
+        s_fix = fm.get(best_m.get(tag[q][0]), mean)
+        rf = rule(q)
+        n_rule_missing += rf not in fm
+        s_rule = fm.get(rf, mean)
+        vals["random"].append(mean)
+        vals["fixed_mod"].append(s_fix)
+        vals["rule"].append(s_rule)
+        vals["selector"].append(s_sel)
+        d_sel_rule.append((q, s_sel - s_rule))
+        d_rule_fix.append((q, s_rule - s_fix))
+        d_rule_rand.append((q, s_rule - mean))
+    n = len(vals["random"])
+    return {"n_test": n, **{k: mean100(v) for k, v in vals.items()},
+            "selector_minus_rule": contrast(d_sel_rule, q2d),
+            "rule_minus_fixed": contrast(d_rule_fix, q2d),
+            "rule_minus_random": contrast(d_rule_rand, q2d),
+            "fixed_formats_train": best_m, "n_rule_format_missing": n_rule_missing}
+
+
+def s9_rule_selector(q2d, meta, nc):
+    section("9. Hand-rule selector vs learned selector, held-out objects (md5(data_id) parity), "
+            "v1 predictions")
+    print("  rule: tabular comparison / aggregation-with-'average' -> bar_chart, other tabular "
+          "-> table_image; timeseries, graph -> text_only")
+    out = {}
+    for tag, ncs in (("all cells", None), ("near-constant cells excluded", nc)):
+        print(f"\n  [{tag}]")
+        print(f"  {'model':15s} {'n_test':>6s} {'nobj':>4s} {'random':>7s} {'fixed':>6s} "
+              f"{'rule':>6s} {'select':>7s} {'sel-rule':>8s} {'obj CI':>15s} {'rule-fix':>8s} "
+              f"{'obj CI':>15s}")
+        rec = {}
+        for name, fn in SELECTOR_MODELS.items():
+            path = os.path.join(ROOT, "results", fn)
+            if not os.path.exists(path):
+                print(f"  {name:15s} missing {fn}")
+                continue
+            r = _selector_eval(read_jsonl(path), q2d, meta, ncs)
+            rec[name] = r
+            sr, rf = r["selector_minus_rule"], r["rule_minus_fixed"]
+            print(f"  {name:15s} {r['n_test']:6d} {sr['n_obj']:4d} {f1(r['random']):>7s} "
+                  f"{f1(r['fixed_mod']):>6s} {f1(r['rule']):>6s} {f1(r['selector']):>7s} "
+                  f"{pp(sr['est']):>8s} {ci_str(sr['obj_ci']):>15s} {pp(rf['est']):>8s} "
+                  f"{ci_str(rf['obj_ci']):>15s}")
+        out["all" if ncs is None else "excl_near_constant"] = rec
     return out
 
 
@@ -724,6 +1031,14 @@ def parse_args():
     p.add_argument("--out", default=None)
     p.add_argument("--b-boot", type=int, default=None)
     p.add_argument("--b-perm", type=int, default=None)
+    p.add_argument("--strict-answerable", action="store_true",
+                   help="V/D only if readable to exact-match precision (see strictify_v2).")
+    p.add_argument("--exclude-near-constant", action="store_true",
+                   help="Also report sections 3/4 and all-answerable subsets with the "
+                        "near-constant (modality, task) cells removed.")
+    p.add_argument("--dump-fully-answerable", default=None, metavar="PATH",
+                   help="Write the question ids answerable (V/D) in every main format under "
+                        "the v2 categories (one per line) and exit; needs no predictions.")
     return p.parse_args()
 
 
@@ -734,7 +1049,9 @@ def main() -> int:
         B_BOOT, B_PERM = 1000, 2000
     B_BOOT = a.b_boot or B_BOOT
     B_PERM = a.b_perm or B_PERM
+    extended = a.strict_answerable or a.exclude_near_constant
     out_path = a.out or os.path.join(HERE, "v2_results_smoke.json" if a.smoke
+                                     else "v2_results_strict.json" if extended
                                      else "v2_results.json")
 
     bench = read_jsonl(a.benchmark)
@@ -748,7 +1065,7 @@ def main() -> int:
     missing = [p for p in [noimg_path, assist_path] if not os.path.exists(p)]
     if not shard_paths:
         missing.insert(0, os.path.join(a.v2_dir, "v2_qwen_shard*.jsonl"))
-    if missing and not a.smoke:
+    if missing and not a.smoke and not a.dump_fully_answerable:
         print("ERROR: missing inputs (use --smoke for partial runs):\n  " + "\n  ".join(missing))
         return 2
 
@@ -773,6 +1090,21 @@ def main() -> int:
                 c[k] = rc[k]
         const_src[tuple(sorted((k, str(c[k])) for k in c))] += 1
         const_by_q[q] = c
+
+    if a.dump_fully_answerable:
+        # Same rule as s1_categories' "fully answerable questions v2" count.
+        fa = []
+        for md in MODS:
+            qs = [q for q in qs_by_mod[md]
+                  if all(c in "VD" for c in (
+                      classify_v2(meta[q], const_by_q.get(q, V2_DEFAULTS))[f]
+                      for f in FORMATS[md]))]
+            print(f"fully answerable questions v2 {md}: {len(qs)}/{len(qs_by_mod[md])}")
+            fa.extend(qs)
+        with open(a.dump_fully_answerable, "w") as fh:
+            fh.write("\n".join(fa) + "\n")
+        print(f"wrote {len(fa)} question ids -> {a.dump_fully_answerable}")
+        return 0
 
     # ---- predictions
     v1rows, st1 = dedupe(read_jsonl(a.v1))
@@ -806,10 +1138,19 @@ def main() -> int:
     for q, r in meta.items():
         cat1[q] = ans.CLASSIFY[r["modality"]](r)
         cat2[q] = classify_v2(r, const_by_q.get(q, V2_DEFAULTS))
+    cat2_default = cat2
+    if a.strict_answerable:
+        cat2 = {q: strictify_v2(meta[q], c) for q, c in cat2_default.items()}
+    nc = load_near_constant() if a.exclude_near_constant else None
     print("\n[v2 rule branches] (question counts)")
     for k in sorted(BRANCH):
-        if k.startswith("v2"):
+        if k.startswith("v2") or (extended and k.startswith("strict")):
             print(f"  {BRANCH[k]:5d}  {k}")
+    if extended:
+        print(f"flags: strict_answerable={a.strict_answerable} "
+              f"exclude_near_constant={a.exclude_near_constant}")
+        if nc is not None:
+            print("near-constant cells excluded: " + ", ".join(f"{m}/{t}" for m, t in sorted(nc)))
 
     res = {"config": {"seed": SEED, "B_boot": B_BOOT, "B_perm": B_PERM, "smoke": a.smoke,
                       "v2_shards": [os.path.relpath(p, ROOT) if p.startswith(ROOT) else p
@@ -819,12 +1160,33 @@ def main() -> int:
                       "v2_branches": {k: v for k, v in BRANCH.items() if k.startswith("v2")}}}
     res["1_categories"] = s1_categories(meta, cat1, cat2, qs_by_mod)
     res["2_per_format"] = s2_per_format(EM1, EM2, qs_by_mod, q2d)
-    res["3_gaps"] = s3_gaps(EM1, EM2, cat1, cat2, qs_by_mod, q2d)
-    res["4_flip_cr"] = s4_flip(EM1, P1, EM2, P2, qs_by_mod, q2d)
+    if extended:
+        res["config"].update(strict_answerable=a.strict_answerable,
+                             exclude_near_constant=a.exclude_near_constant,
+                             near_constant_cells=sorted(f"{m}|{t}" for m, t in nc) if nc
+                             else None)
+        section("1b. All-answerable question counts (every main format V or D)")
+        labs = {"default": cat2_default}
+        if a.strict_answerable:
+            labs["strict"] = cat2
+        res["1b_all_answerable_counts"] = fa_counts(meta, labs, qs_by_mod,
+                                                    nc or load_near_constant())
+    res["3_gaps"] = s3_gaps(EM1, EM2, cat1, cat2, qs_by_mod, q2d, nc=nc, meta=meta)
+    if extended:
+        EMt1 = tol_table(v1rows, meta)
+        EMt2 = tol_table(v2rows, meta)
+        res["3b_identification"] = s3b_identification(
+            EM1, EM2, EMt1, EMt2, cat2, meta, qs_by_mod, q2d, nc or load_near_constant(),
+            "strict" if a.strict_answerable else "default")
+    res["4_flip_cr"] = s4_flip(EM1, P1, EM2, P2, qs_by_mod, q2d, nc=nc, meta=meta)
     res["5_noimage"] = s5_noimage(EM0, EM2, meta, qs_by_mod, q2d)
+    if extended:
+        res["5b_cv_prior"] = s5b_cv_prior(EM2, qs_by_mod, q2d)
     res["6_assist"] = s6_assist(EMa, meta, q2d)
     res["7_degree"] = s7_degree(EM2, meta, qs_by_mod, q2d)
     res["8_cost"] = s8_cost(v2rows, man, noimg_rows)
+    if extended:
+        res["9_rule_selector"] = s9_rule_selector(q2d, meta, nc or load_near_constant())
 
     with open(out_path, "w") as fh:
         json.dump(res, fh, indent=1, default=float)

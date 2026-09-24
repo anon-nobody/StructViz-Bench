@@ -491,6 +491,32 @@ def main() -> int:
                 bq[r["question_id"]][r["viz_type"]] = float(r["exact_match"])
         dd = [v["text_only_deg"] - v["text_only"] for v in bq.values() if "text_only_deg" in v and "text_only" in v]
         check("graph degree_query: text_only_deg - text_only", 10.6, 100 * sum(dd) / len(dd))
+        # identified residual effects (strict answerability, near-constant cells excluded):
+        # recomputed by scripts/analysis/v2_analysis.py --strict-answerable --exclude-near-constant
+        _sj = os.path.join(ROOT, "scripts", "analysis", "v2_results_strict.json")
+        if os.path.exists(_ans.replace("answerability.py", "v2_analysis.py")):
+            subprocess.run([sys.executable, _ans.replace("answerability.py", "v2_analysis.py"), "--strict-answerable", "--exclude-near-constant"],
+                           cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        if os.path.exists(_sj):
+            sj = json.load(open(_sj))
+            ident = sj["3b_identification"]
+            check("residual gap, tabular all-answerable excl. near-constant", 11.3, ident["tabular"]["v2_all_answerable_exclNC"]["est"])
+            check("residual gap, tabular: n questions", 186, ident["tabular"]["v2_all_answerable_exclNC"]["n_units"], tol=0, unit="")
+            check("residual gap, graph all-answerable excl. near-constant", 4.9, ident["graph"]["v2_all_answerable_exclNC"]["est"])
+            check("residual gap, graph: n questions", 528, ident["graph"]["v2_all_answerable_exclNC"]["n_units"], tol=0, unit="")
+            check("time-series all-answerable questions excl. near-constant", 0, ident["timeseries"]["v2_all_answerable_exclNC"]["n_q"], tol=0, unit="")
+            check("time-series non-lossy gap on non-constant questions", 21.4, ident["timeseries"]["v2_nonlossy3_all_exclNC"]["est"])
+            check("tabular gap excl. near-constant and value extraction (v2)", 12.8, ident["tabular"]["v2_all_exclNC_excl_value_extraction"]["est"])
+            pr = sj["5b_cv_prior"]
+            def _pdiff(k):
+                e = pr[k]
+                return e.get("em_minus_prior", e.get("diff", e.get("est")))
+            check("v2 node_link EM minus CV prior (graph)", -1.9, _pdiff("graph|node_link"))
+            check("v2 text_only EM minus CV prior (series)", 2.3, _pdiff("timeseries|text_only"))
+            check("v2 table_image EM minus CV prior (tabular)", 33.9, _pdiff("tabular|table_image"))
+        else:
+            _skipped.append("strict v2 results")
+            print("  SKIP  strict v2 results (scripts/analysis/v2_results_strict.json missing)")
     else:
         _skipped.append("v2 suite results")
         print("  SKIP  v2 / no-image / assist results (results/v2/*.jsonl missing)")

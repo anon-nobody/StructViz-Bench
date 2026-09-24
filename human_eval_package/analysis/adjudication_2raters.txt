@@ -1,3 +1,6 @@
+Recomputation-based adjudication of the 100 v1 human-audit items (two raters).
+GT_full_ok: answer function re-run on the full data agrees with the released key (None = task not re-implemented here).
+truncated-view answer: the same function on the rows/points visible in that rendering; equals GT? tells whether truncation changes the answer.
 item  mod  task  viz | A1 A2 | GT_full_ok | truncated-view answer | equals GT? | note
 H000 tab value_extraction table_image  | Cor Amb | True | A                                  | True | 'patient_group'과 week의 경계가 모호하여 해석이 나뉠 수
 H001 tab ranking          scatter_plot | Inc Amb | True | (first two numeric cols only)      | None | line_b 라는 변수명을 차트만 보고 알 수 없음
@@ -43,7 +46,7 @@ H040 tab ranking          bar_chart    | Inc Inc | True | (column means only)   
 H041 gra degree_query     text_only    | Inc Inc | None | (first 43 edges visible)           | None | 전체 View 잘린 것 같지만 보이는 View에 있는 것만 가지고 2E/
 H042 gra degree_query     node_link    | Amb Amb | None | None                               | None | 노드끼리 너무 겹쳐져서 간선이 보이지 않는다.
 H043 tab outlier_detectio table_image  | Inc Cor | True | luxury                             | True | 꼭 그렇게 보이지는 않는다.
-H044 tab counterfactual   scatter_plot | Inc Inc | False | (first two numeric cols only)      | None | 차트상으로는 rainfall_mm은 보이지만, fertilizer_kg는
+H044 tab counterfactual   scatter_plot | Inc Inc | True | (first two numeric cols only)      | None | 차트상으로는 rainfall_mm은 보이지만, fertilizer_kg는
 H045 gra connectivity     node_link    | Inc Inc | None | None                               | None | 노드 번호가 없어서 구분이 안된다.
 H046 tab outlier_detectio table_image  | Inc Inc | True | D2                                 | False | household_size 평균은 3.07818이고, 가장 벗어난 dis
 H047 tab outlier_detectio bar_chart    | Inc Inc | True | (column means only)                | None | 차트만으로는 school 항목이 보이지 않는다.
@@ -60,7 +63,7 @@ H057 gra bipartite_check  node_link    | Cor Inc | None | None                  
 H058 gra counterfactual   text_only    | Cor Cor | None | None                               | None | 
 H059 tab correlation      heatmap      | Inc Inc | True | None                               | None | 차트로 보이는 것 만으로는 구분하기 어려움.
 H060 tab value_extraction scatter_plot | Inc Inc | False | (first two numeric cols only)      | None | 이 차트만 가지고는 판단하기 어려움.
-H061 tab counterfactual   bar_chart    | Cor Cor | False | (column means only)                | None | 
+H061 tab counterfactual   bar_chart    | Cor Cor | True | (column means only)                | None | 
 H062 tim counterfactual_s recurrence_p | Cor Cor | None | None                               | None | 
 H063 tab counterfactual   text_only    | Cor Cor | True | yes                                | True | 
 H064 tim counterfactual_s line_plot    | Cor Cor | None | None                               | None | 
@@ -102,4 +105,5 @@ H098 tim counterfactual_h text_only    | Cor Inc | None | (first 43 points visib
 후반부 평균
 H099 gra degree_query     text_only    | Cor Inc | None | (first 43 edges visible)           | None | 전체 자료가 보이지않는다. 노드4 이후의 노드가 보이지 않아 판별이 불가
 
-SUMMARY {('GTfull_ok', 'trunc_same'): 7, ('GTfull_ok', 'n/a'): 82, ('GTfull_ok', 'trunc_changes_answer'): 8, ('GT_FULL_MISMATCH', 'n/a'): 3}
+SUMMARY {('GTfull_ok', 'trunc_same'): 7, ('GTfull_ok', 'n/a'): 84, ('GTfull_ok', 'trunc_changes_answer'): 8, ('GT_FULL_MISMATCH', 'n/a'): 1}
+Note: one GT_FULL_MISMATCH (H060) is a date-string formatting difference (2024-01-07 00:00:00 vs 2024-01-07T00:00:00), not a key error.

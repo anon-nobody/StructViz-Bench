@@ -63,7 +63,7 @@
       "url": "https://huggingface.co/datasets/EvalData/StructViz-Bench"
     }
   ],
-  "citeAs": "@inproceedings{structvizbench2026, title={StructViz-Bench: A Controlled Benchmark for Evaluating Visualization-Format Dependence in MLLM Performance on Structured Data}, author={Anonymous}, booktitle={Under review (venue anonymized)}, year={2026}}",
+  "citeAs": "@misc{structvizbench2026, title={StructViz-Bench: A Controlled Benchmark for Evaluating Visualization-Format Dependence in MLLM Performance on Structured Data}, author={Anonymous}, note={Under review}, year={2026}}",
   "rai:dataCollection": "Benchmark items are programmatically generated from parameterized templates over controlled synthetic data generators and from public real-world datasets (SciTabAlign, ETT, NetworkX social networks). Synthetic components use fixed RNG seeds (seed=42) for reproducibility. No web scraping, no personally identifiable information, and no human-subject data collection are performed.",
   "rai:dataCollectionType": "Programmatic generation from parameterized templates; aggregation of public datasets under upstream licenses.",
   "rai:dataCollectionRawData": "Raw data sources: SciTabAlign tabular claim-verification dataset; ETT (Electricity Transformer Temperature) time-series dataset; NetworkX canonical social-network graphs (Karate Club, Les Miserables, Florentine Families, Davis Southern Women); synthetic data generators under src/generation/.",
@@ -77,6 +77,7 @@
   "rai:dataLimitations": "Not intended as a deployment decision tool for safety-critical domains without additional validation. Template-generated questions do not fully capture naturalistic queries. Retrievability scores and failure buckets are heuristic and lack human validation; they should be treated as exploratory. API-based model results may vary across calls due to provider-side updates.",
   "rai:personalSensitiveInformation": "None. All data are synthetic or from public datasets with no personal or sensitive information. SciTabAlign contains scientific paper tables; ETT contains electricity transformer temperature measurements; NetworkX graphs are classic social-network datasets without personal identifiers.",
   "rai:dataUseCases": "Primary: benchmarking MLLM visualization-format dependence; secondary: representation-invariance research, evaluation-protocol research, diagnostic analysis of structured-data reasoning.",
+  "rai:hasSyntheticData": true,
   "keywords": [
     "multimodal",
     "benchmark",
@@ -91,7 +92,7 @@
       "@id": "base-items-file",
       "name": "base_items.jsonl",
       "description": "Synthetic-only single-modality items: 1,500 questions (500 tabular + 500 time-series + 500 graph) from programmatically generated data.",
-      "contentUrl": "benchmark/base_items.jsonl",
+      "contentUrl": "https://huggingface.co/datasets/EvalData/StructViz-Bench/resolve/main/benchmark/base_items.jsonl",
       "encodingFormat": "application/jsonlines",
       "sha256": "5d77094f209cb6e4d2fc2cbcd87da1f5dc55679b606f28798ddd26e0d9bc7e5b"
     },
@@ -100,7 +101,7 @@
       "@id": "mixed-items-file",
       "name": "mixed_items.jsonl",
       "description": "Cross-modal composite evaluation items (600 items) requiring reasoning across two data modalities simultaneously (tabular+timeseries, tabular+graph, timeseries+graph).",
-      "contentUrl": "benchmark/mixed_items.jsonl",
+      "contentUrl": "https://huggingface.co/datasets/EvalData/StructViz-Bench/resolve/main/benchmark/mixed_items.jsonl",
       "encodingFormat": "application/jsonlines",
       "sha256": "06f022e16dda6f35e8dbb01e1c8dd73ad6b981b399a4c7606b1943da78313d91"
     },
@@ -109,7 +110,7 @@
       "@id": "realworld-test-file",
       "name": "realworld_test.jsonl",
       "description": "Full benchmark (3,795 items): superset containing all 1,500 synthetic items plus 2,295 real-world items (1,265 SciTabAlign tabular + 870 ETT time-series + 160 NetworkX graph). This is the primary evaluation file. Use the source field to filter by provenance.",
-      "contentUrl": "benchmark/realworld_test.jsonl",
+      "contentUrl": "https://huggingface.co/datasets/EvalData/StructViz-Bench/resolve/main/benchmark/realworld_test.jsonl",
       "encodingFormat": "application/jsonlines",
       "sha256": "6ef2baf69daefac216200fbcc87df7087bb88e6d987390f64ce24364a2138779"
     }
@@ -132,7 +133,7 @@
               "@id": "base-items-file"
             },
             "extract": {
-              "jsonPath": "$.question_id"
+              "column": "question_id"
             }
           }
         },
@@ -147,7 +148,7 @@
               "@id": "base-items-file"
             },
             "extract": {
-              "jsonPath": "$.question"
+              "column": "question"
             }
           }
         },
@@ -162,7 +163,7 @@
               "@id": "base-items-file"
             },
             "extract": {
-              "jsonPath": "$.answer"
+              "column": "answer"
             }
           }
         },
@@ -177,7 +178,7 @@
               "@id": "base-items-file"
             },
             "extract": {
-              "jsonPath": "$.modality"
+              "column": "modality"
             }
           }
         },
@@ -192,7 +193,7 @@
               "@id": "base-items-file"
             },
             "extract": {
-              "jsonPath": "$.source"
+              "column": "source"
             }
           }
         },
@@ -207,7 +208,7 @@
               "@id": "base-items-file"
             },
             "extract": {
-              "jsonPath": "$.viz_methods"
+              "column": "viz_methods"
             }
           }
         },
@@ -222,7 +223,7 @@
               "@id": "base-items-file"
             },
             "extract": {
-              "jsonPath": "$.difficulty"
+              "column": "difficulty"
             }
           }
         },
@@ -237,7 +238,7 @@
               "@id": "base-items-file"
             },
             "extract": {
-              "jsonPath": "$.task"
+              "column": "task"
             }
           }
         }

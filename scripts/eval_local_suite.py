@@ -16,6 +16,9 @@ Examples:
     # No-image (question text only) baseline:
     python scripts/eval_local_suite.py --model qwen --no-image \
         --output results/noimage_qwen.jsonl --gpu 1
+    # Raw-data text baseline (serialized data + question, no image):
+    python scripts/eval_local_suite.py --model qwen --raw-text \
+        --output results/v2/rawtext_qwen.jsonl --gpu 1
     # Merge:
     python scripts/merge_shards.py results/suite_v2/qwen.shard*.jsonl \
         --output results/suite_v2/qwen.jsonl
@@ -40,10 +43,17 @@ from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 NO_IMAGE_VIZ = "none"
+RAW_TEXT_VIZ = "raw_text"
+
+# Pinned HF revisions (commit hashes of the locally cached snapshots).
+PINNED_REVISIONS: dict[str, str] = {
+    "qwen32b-hf": "7cfb30d71a1f4f49a57592323337a4a4727301da",
+}
 
 MODEL_IDS: dict[str, str] = {
     "qwen": "Qwen/Qwen2.5-VL-7B-Instruct",
     "qwen32b": "Qwen/Qwen2.5-VL-32B-Instruct",
+    "qwen32b-hf": "Qwen/Qwen2.5-VL-32B-Instruct",
     "internvl": "OpenGVLab/InternVL2_5-8B",
 }
 
@@ -56,11 +66,17 @@ def parse_args() -> argparse.Namespace:
                    help="Manifest JSONL (question_id, modality, task, viz_type, image_path).")
     p.add_argument("--benchmark", type=Path, default=Path("benchmark/realworld_test.jsonl"))
     p.add_argument("--output", type=Path, required=True)
-    p.add_argument("--gpu", type=int, default=None,
-                   help="Physical GPU index (sets CUDA_VISIBLE_DEVICES before torch import).")
+    p.add_argument("--gpu", type=str, default=None,
+                   help="Physical GPU index or comma list, e.g. 0,2 (sets CUDA_VISIBLE_DEVICES "
+                        "before torch import; a list spreads the model with device_map=auto).")
+    p.add_argument("--headroom-gb", type=float, default=4.0,
+                   help="qwen32b-hf: max_memory per GPU = free memory at load time minus this.")
     p.add_argument("--shard", type=str, default="0/1", help="i/n: keep rows with index %% n == i.")
     p.add_argument("--no-image", action="store_true",
                    help="One row per question_id with viz_type='none'; question text only.")
+    p.add_argument("--raw-text", action="store_true",
+                   help="One row per question_id with viz_type='raw_text'; no image, the user "
+                        "turn is the serialized raw data followed by the question.")
     p.add_argument("--suite", type=str, default=None,
                    help="Suite label (default: manifest row 'suite', else manifest parent dir).")
     p.add_argument("--limit", type=int, default=None, help="Process at most N pending rows.")
@@ -117,6 +133,56 @@ def parse_shard(spec: str) -> tuple[int, int]:
     return i, n
 
 
+def _fmt_cell(v: Any) -> str:
+    """Cell text for the raw-text CSV: values as stored (None -> empty)."""
+    if v is None:
+        return ""
+    if isinstance(v, (dict, list)):
+        return json.dumps(v, ensure_ascii=False)
+    return str(v)
+
+
+def serialize_raw_data(item: dict[str, Any]) -> str:
+    """Serialize a benchmark item's ``data`` field as plain text (no truncation).
+
+    tabular (list of row dicts) -> CSV with header and a leading ``row`` index column;
+    timeseries (list of floats) -> one ``t=<i>: <value>`` line per point;
+    graph (node_link dict) -> ``nodes: 0..N-1`` then one ``u -- v`` line per edge in
+    stored order (node/edge attributes are not included).
+    """
+    import csv
+
+    modality = str(item["modality"])
+    data = item["data"]
+    if modality == "tabular":
+        cols: list[str] = []
+        for r in data:
+            for c in r:
+                if c not in cols:
+                    cols.append(c)
+        buf = io.StringIO()
+        w = csv.writer(buf, lineterminator="\n")
+        w.writerow(["row", *cols])
+        for i, r in enumerate(data):
+            w.writerow([i, *(_fmt_cell(r.get(c)) for c in cols)])
+        return buf.getvalue().rstrip("\n")
+    if modality == "timeseries":
+        return "\n".join(f"t={i}: {v}" for i, v in enumerate(data))
+    if modality == "graph":
+        ids = sorted(int(n["id"]) for n in data["nodes"])
+        if ids != list(range(len(ids))):
+            raise ValueError(f"graph node ids are not 0..N-1: {item['question_id']}")
+        lines = [f"nodes: 0..{len(ids) - 1}"]
+        lines += [f"{e['source']} -- {e['target']}" for e in data["edges"]]
+        return "\n".join(lines)
+    raise ValueError(f"unknown modality {modality!r}")
+
+
+def raw_text_message(item: dict[str, Any]) -> str:
+    """User-turn text for --raw-text: serialized data, blank line, question."""
+    return f"{serialize_raw_data(item)}\n\nQuestion: {item['question']}"
+
+
 def resolve_image_path(raw: str, manifest_path: Path | None) -> Path:
     """Resolve manifest image_path: absolute, project-relative, or manifest-relative."""
     p = Path(raw)
@@ -142,6 +208,53 @@ def hf_revision(repo_id: str) -> str | None:
     except Exception:  # noqa: BLE001
         pass
     return None
+
+
+def free_memory_caps(headroom_gb: float) -> dict[int, int]:
+    """max_memory per visible GPU: current free bytes minus headroom (no CPU entry)."""
+    import torch
+
+    caps: dict[int, int] = {}
+    for i in range(torch.cuda.device_count()):
+        free, _total = torch.cuda.mem_get_info(i)
+        caps[i] = max(0, int(free - headroom_gb * 2**30))
+    return caps
+
+
+def build_qwen_hf_sharded(checkpoint: str, revision: str, max_memory: dict[Any, int]) -> Any:
+    """QwenVLModel with an HF bf16 load across several GPUs (device_map=auto + max_memory).
+
+    Only ``_load`` differs from QwenVLModel; prompting, greedy decoding, parsing and the
+    raw-text path are inherited unchanged.
+    """
+    from dataclasses import dataclass, field
+    import importlib
+
+    from src.models.local_models import QwenVLModel
+
+    @dataclass(slots=True)
+    class QwenVLModelSharded(QwenVLModel):
+        revision: str | None = None
+        max_memory: dict[Any, int] = field(default_factory=dict)
+
+        def _load(self) -> None:
+            tf = importlib.import_module("transformers")
+            torch = importlib.import_module("torch")
+            self._processor = tf.AutoProcessor.from_pretrained(
+                self.checkpoint, revision=self.revision)
+            self._model = tf.Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                self.checkpoint,
+                revision=self.revision,
+                torch_dtype=torch.bfloat16,
+                device_map="auto",
+                max_memory=self.max_memory or None,
+            )
+            self._model.eval()
+
+    return QwenVLModelSharded(
+        name=checkpoint.split("/")[-1], checkpoint=checkpoint, device="cuda",
+        revision=revision, max_memory=max_memory,
+    )
 
 
 def build_model(model_key: str) -> Any:
@@ -309,7 +422,7 @@ def load_done(output: Path) -> tuple[set[tuple[str, str]], int]:
 
 def build_tasks(args: argparse.Namespace, bench: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     """Build the ordered list of work rows (before sharding)."""
-    if args.no_image:
+    if args.no_image or args.raw_text:
         if args.manifest is not None:
             qids: list[str] = []
             seen: set[str] = set()
@@ -320,9 +433,10 @@ def build_tasks(args: argparse.Namespace, bench: dict[str, dict[str, Any]]) -> l
                     qids.append(q)
         else:
             qids = list(bench)
-        suite = args.suite or "no_image"
+        suite = args.suite or ("raw_text" if args.raw_text else "no_image")
+        viz = RAW_TEXT_VIZ if args.raw_text else NO_IMAGE_VIZ
         return [
-            {"question_id": q, "viz_type": NO_IMAGE_VIZ, "image_path": None, "suite": suite}
+            {"question_id": q, "viz_type": viz, "image_path": None, "suite": suite}
             for q in qids
         ]
     if args.manifest is None:
@@ -355,6 +469,8 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     """Entry point."""
     global _LOG_FH
     args = parse_args()
+    if args.no_image and args.raw_text:
+        raise SystemExit("--no-image and --raw-text are mutually exclusive")
 
     # Must happen before torch is imported anywhere.
     if args.gpu is not None:
@@ -416,14 +532,21 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         return
 
     model_id = MODEL_IDS[args.model]
-    revision = hf_revision(model_id)
+    revision = PINNED_REVISIONS.get(args.model) or hf_revision(model_id)
     if args.model.startswith("qwen") and not args.no_vision_mask_patch:
         ok = patch_qwen_vision_mask(query_chunk=args.vision_attn_chunk)
         log(f"Qwen vision-mask sync patch applied: {ok} "
             f"(vision_attn_chunk={args.vision_attn_chunk})")
     t0 = time.time()
-    model = build_model(args.model)
-    if args.no_image and hasattr(model, "system_prompt"):
+    if args.model == "qwen32b-hf":
+        caps = free_memory_caps(args.headroom_gb)
+        log("max_memory caps (GiB, visible index -> physical "
+            f"{os.environ.get('CUDA_VISIBLE_DEVICES')}): "
+            + ", ".join(f"{k}:{v / 2**30:.1f}" for k, v in caps.items()))
+        model = build_qwen_hf_sharded(model_id, revision, caps)
+    else:
+        model = build_model(args.model)
+    if (args.no_image or args.raw_text) and hasattr(model, "system_prompt"):
         # The shared system prompt says "Look at the image"; without an image that wording
         # invites refusals ("none"). Keep every answer-format rule, drop only the image phrase.
         model.system_prompt = (
@@ -431,7 +554,8 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
             .replace("You are a precise visual data analyst. ", "You are a precise data analyst. ")
             .replace("Look at the image and answer the question. ", "Answer the question. ")
         )
-        log("no-image mode: system prompt image phrase removed")
+        log(f"{'raw-text' if args.raw_text else 'no-image'} mode: system prompt image phrase "
+            f"removed")
     if hasattr(model, "_load"):
         model._load()  # noqa: SLF001 - eager load so load time is not billed to row 1
     log(f"Model loaded in {time.time() - t0:.1f}s (revision={revision})")
@@ -447,6 +571,24 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         log(f"WARNING: {msg}")
     elif dmap:
         log(f"device_map: all {len(dmap)} modules on {sorted({str(d) for d in dmap.values()})}")
+    if hf_model is not None and dmap:
+        import collections
+
+        import torch as _t
+
+        per_dev = collections.Counter(str(d) for d in dmap.values())
+        vis_dev = {str(d) for k, d in dmap.items() if k.startswith("visual")}
+        log("placement: modules per device " + str(dict(per_dev)) + f"; visual on {sorted(vis_dev)}; "
+            + "allocated GiB " + ", ".join(
+                f"{i}:{_t.cuda.memory_allocated(i) / 2**30:.1f}"
+                for i in range(_t.cuda.device_count())))
+    vis = getattr(hf_model, "visual", None)
+    if vis is not None and getattr(vis, "blocks", None):
+        attn_cls = type(vis.blocks[0].attn)
+        log(f"vision attention: {attn_cls.__name__} x{len(vis.blocks)} blocks, "
+            f"patched={getattr(attn_cls, '_structviz_patched', False)}, "
+            f"window_size={getattr(vis, 'window_size', None)}, "
+            f"fullatt_blocks={getattr(vis, 'fullatt_block_indexes', None)}")
 
     import torch
 
@@ -464,6 +606,9 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     n_new = n_err = 0
     run_start = time.time()
     prompt_cache: dict[tuple[str, bool], str | None] = {}
+    tokenizer = getattr(getattr(model, "_processor", None), "tokenizer", None)
+    if args.raw_text and not hasattr(model, "build_prompt_text"):
+        raise SystemExit("--raw-text needs a model with build_prompt_text (Qwen)")
 
     def flush() -> None:
         out.flush()
@@ -475,6 +620,8 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
                 break
             item = bench[t["question_id"]]
             question, task = str(item["question"]), str(item.get("task", "generic"))
+            if args.raw_text:
+                question = raw_text_message(item)  # user turn = serialized data + question
             image = None
             img_meta: dict[str, Any] = {"image_path": None, "image_sha256": None,
                                         "image_w": None, "image_h": None}
@@ -497,6 +644,11 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
             pkey = (question, has_image)
             if pkey not in prompt_cache:
                 prompt_cache[pkey] = prompt_hash(model, question, has_image)
+            n_prompt_tokens: int | None = None
+            if args.raw_text and tokenizer is not None:
+                n_prompt_tokens = len(tokenizer(
+                    model.build_prompt_text(question, has_image=False),
+                    add_special_tokens=False)["input_ids"])
 
             raw: str | None = None
             prediction = "[ERROR]"
@@ -539,6 +691,8 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
                 "timestamp_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "latency_s": round(latency, 3),
             }
+            if args.raw_text:
+                row["n_prompt_tokens"] = n_prompt_tokens
             if error_msg is not None:
                 row["error"] = error_msg
                 n_err += 1

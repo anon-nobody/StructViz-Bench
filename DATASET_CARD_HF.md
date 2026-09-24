@@ -61,7 +61,7 @@ dataset_info:
 
 StructViz-Bench is a benchmark for evaluating Multimodal Large Language Model (MLLM) reasoning over visualized structured data. It systematically measures **visualization sensitivity** -- the degree to which a model's reasoning performance changes when the same underlying data is presented in different visual formats.
 
-The benchmark encompasses three primary data modalities (tabular, time-series, and graph), 14 distinct visualization types, 4 question difficulty levels (1-hop, 2-hop, 3-hop, and counterfactual), and a diverse set of reasoning tasks. It contains 3,795 base items, which expand to 18,315 rendered instances per model. Released evaluations cover four core models (GPT-4o, Gemini Flash, Qwen2.5-VL-7B, Claude Sonnet) for a total of 73,260 instances, plus a supplementary same-family scale evaluation on Qwen2.5-VL-32B for testing whether parameter scale eliminates format dependence.
+The benchmark encompasses three primary data modalities (tabular, time-series, and graph), 14 distinct visualization types, 4 question difficulty levels (1-hop, 2-hop, 3-hop, and counterfactual), and a diverse set of reasoning tasks. It contains 3,795 base items, which expand to 18,315 rendered instances per model. Released evaluations cover seven models (GPT-4o, Gemini Flash, Gemini-2.5, Claude Sonnet, Qwen2.5-VL-7B/32B, InternVL2.5-8B), 18,315 rendered instances each, plus the corrected v2 suite, a no-image baseline and a calculation-aid experiment on Qwen2.5-VL-7B.
 
 ### Supported Tasks
 
@@ -127,7 +127,7 @@ StructViz-Bench is an **evaluation-only** benchmark and does not provide trainin
 
 Note: `realworld_test.jsonl` is a superset of `base_items.jsonl`. The name reflects that it includes real-world sources; use the `source` field (`synthetic`, `scitabalign`, `ett`, `networkx_realworld`) to filter by provenance.
 
-When expanded across all applicable visualization types, the base items yield 18,315 rendered instances per model. Across four evaluated models, this produces a total of 73,260 evaluated instances.
+When expanded across all applicable visualization types, the base items yield 18,315 rendered instances per model. Seven models were evaluated on the released suite.
 
 ## Dataset Creation
 
