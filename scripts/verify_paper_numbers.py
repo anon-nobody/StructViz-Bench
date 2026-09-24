@@ -631,6 +631,47 @@ def main() -> int:
         check("tabular gap, 7B", 37.1, max(g7.values()) - min(g7.values()))
         check("tabular gap, 32B", 34.7, max(g32.values()) - min(g32.values()))
 
+    section("Appendix — human image-answerability audit (two raters, 100 items)")
+    _hp = os.path.join(ROOT, "human_eval_package")
+    _sheets = [os.path.join(_hp, f"ratings_annotator{i}.csv") for i in (1, 2)]
+    if all(os.path.exists(f) for f in _sheets):
+        import csv as _csv
+        _r = [list(_csv.DictReader(open(f, encoding="utf-8"))) for f in _sheets]
+        _cats = ["Correct", "Ambiguous", "Incorrect"]
+        for _i, _rows in enumerate(_r, 1):
+            _c = {k: sum(x["rating"] == k for x in _rows) for k in _cats}
+            _stated = {1: (44, 7, 49), 2: (34, 25, 41)}[_i]
+            check_bool(f"rater {_i}: {_stated[0]}/{_stated[1]}/{_stated[2]} correct/ambiguous/incorrect",
+                       tuple(_c[k] for k in _cats) == _stated, str(_c))
+        _a = {x["item_id"]: x["rating"] for x in _r[0]}; _b = {x["item_id"]: x["rating"] for x in _r[1]}
+        _ids = sorted(set(_a) & set(_b)); _n = len(_ids)
+        check_bool("both raters: 27 items correct, 32 incorrect",
+                   sum(_a[i] == _b[i] == "Correct" for i in _ids) == 27
+                   and sum(_a[i] == _b[i] == "Incorrect" for i in _ids) == 32)
+        def _kappa(fa, fb):
+            po = sum(fa(i) == fb(i) for i in _ids) / _n
+            vals = {fa(i) for i in _ids} | {fb(i) for i in _ids}
+            pe = sum((sum(fa(i) == v for i in _ids) / _n) * (sum(fb(i) == v for i in _ids) / _n) for v in vals)
+            return po, (po - pe) / (1 - pe)
+        _po3, _k3 = _kappa(lambda i: _a[i], lambda i: _b[i])
+        _po2, _k2 = _kappa(lambda i: _a[i] == "Correct", lambda i: _b[i] == "Correct")
+        check("three-way agreement", 62, 100 * _po3, tol=0.5, unit="%")
+        check("three-way Cohen's kappa", 0.40, _k3, tol=0.005, unit="")
+        check("legible-vs-not agreement", 76, 100 * _po2, tol=0.5, unit="%")
+        check("legible-vs-not Cohen's kappa", 0.50, _k2, tol=0.005, unit="")
+        sys.path.insert(0, _hp)
+        from human_eval_aggregate import answer_match as _am  # noqa: E402
+        _ans = [x for x in _r[1] if x["your_answer"].strip()]
+        _ok = [x for x in _ans if _am(x["your_answer"], x["ground_truth"])]
+        check_bool("rater 2 own answers match key on 42 of 89 answered",
+                   len(_ans) == 89 and len(_ok) == 42, f"answered={len(_ans)} match={len(_ok)}")
+        check_bool("rater 2: 10 matches among the 25 items marked ambiguous",
+                   sum(x["rating"] == "Ambiguous" for x in _ok) == 10
+                   and sum(x["rating"] == "Ambiguous" for x in _r[1]) == 25)
+    else:
+        _skipped.append("human audit sheets")
+        print("  SKIP  human audit sheets (human_eval_package/ratings_annotator{1,2}.csv missing)")
+
     section("Figure 1 — teaser example (tabular_001326::difficulty=2-hop, key 303.1)")
     _tq = "tabular_001326::difficulty=2-hop"
     _ans = {}

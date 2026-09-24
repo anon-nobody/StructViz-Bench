@@ -4,7 +4,7 @@ human_eval_aggregate.py consumes. Pure stdlib.
 
 Usage:
   python assemble_ratings.py --sheets ratings_annotator1.csv ratings_annotator2.csv \
-      ratings_annotator3.csv --out ratings_long.csv
+      --out ratings_long.csv
 Then:
   python human_eval_aggregate.py --ratings ratings_long.csv
 """

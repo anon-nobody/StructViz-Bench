@@ -112,10 +112,11 @@ def answer_match(pred: str, gold: str, abs_tol=0.05, rel_tol=0.01) -> bool:
         return False
     if p == g:
         return True
+    p = p.rstrip(".")
     pn, gn = _num(p), _num(g)
     if pn is not None and gn is not None:
         return abs(pn - gn) <= max(abs_tol, rel_tol * abs(gn))
-    return g in p  # lenient substring for text
+    return p == g  # no substring credit: "no" must not match inside "cannot tell"
 
 
 def report(per_item, answers=None, truth=None):
