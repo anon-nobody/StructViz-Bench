@@ -484,6 +484,33 @@ def main() -> int:
             check(f"no-image EM, {md}", stated, em(noimg, lambda r, m=md: r["modality"] == m), unit="%")
         for fmt, stated in [("table_full", 76.1), ("table_full_means", 91.0), ("bar_rows", 81.6), ("bar_rows_means", 93.7)]:
             check(f"assist {fmt} EM", stated, em(assist, lambda r, f=fmt: r["viz_type"] == f), unit="%")
+        iv = _load_v2("v2_internvl_subset.jsonl")
+        if iv:
+            _i = {}
+            for r in iv:
+                if str(r.get("prediction")) != "[ERROR]":
+                    _i[(r["question_id"], r["viz_type"])] = r
+            iv = list(_i.values())
+            check("InternVL v2 subset rows", 5480, len(iv), tol=0, unit="")
+            check("InternVL v2 subset table_image EM", 7.3, em(iv, lambda r: r["modality"] == "tabular" and r["viz_type"] == "table_image"), unit="%")
+            check("InternVL v2 subset heatmap EM (tabular)", 40.4, em(iv, lambda r: r["modality"] == "tabular" and r["viz_type"] == "heatmap"), unit="%")
+            _sji = os.path.join(ROOT, "scripts", "analysis", "v2_results_internvl_strict.json")
+            if os.path.exists(_sji):
+                sji = json.load(open(_sji))["3b_identification"]
+                check("InternVL residual, tabular all-answerable", 6.5, sji["tabular"]["v2_all_answerable_exclNC"]["est"])
+                check("InternVL residual, graph all-answerable", 1.7, sji["graph"]["v2_all_answerable_exclNC"]["est"])
+        raw = _load_v2("rawtext_qwen.jsonl")
+        if raw:
+            _r = {}
+            for r in raw:
+                if str(r.get("prediction")) != "[ERROR]":
+                    _r[r["question_id"]] = r
+            raw = list(_r.values())
+            for md, stated in [("tabular", 52.4), ("timeseries", 37.5), ("graph", 41.4)]:
+                check(f"raw-data text input EM, {md}", stated, em(raw, lambda r, m=md: r["modality"] == m), unit="%")
+        else:
+            _skipped.append("raw-text baseline")
+            print("  SKIP  raw-text baseline (results/v2/rawtext_qwen.jsonl missing)")
         # degree confound: text_only_deg - text_only on degree_query
         bq = defaultdict(dict)
         for r in v2:

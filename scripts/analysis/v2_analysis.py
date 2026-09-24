@@ -79,6 +79,17 @@ TS_VALUE_PRECISE_IF_NUMERIC = {"median_mean_relation", "anomaly_detection"}
 TS_DRAWINGS = ["line_plot", "heatmap", "gaf", "recurrence_plot"]
 TS_NONLOSSY = ["line_plot", "heatmap", "text_only"]
 
+# --model: file names per evaluated model (qwen = default, full v2 suite in 4 shards;
+# internvl = v2 subset of default-fully-answerable questions, single file)
+MODEL_FILES = {
+    "qwen": {"name": "Qwen2.5-VL-7B", "v1": "full_qwen_extracted.jsonl",
+             "v2_glob": "v2_qwen_shard*.jsonl", "noimg": "noimage_qwen.jsonl",
+             "assist": "assist_qwen.jsonl", "manifest": "manifest.jsonl"},
+    "internvl": {"name": "InternVL2.5-8B", "v1": "full_internvl.jsonl",
+                 "v2_glob": "v2_internvl_subset.jsonl", "noimg": "noimage_internvl.jsonl",
+                 "assist": "assist_internvl.jsonl", "manifest": "manifest_subset32b.jsonl"},
+}
+
 # section 9 (hand-rule selector) inputs: v1 predictions of the 7 models used in cluster_cis.py
 SELECTOR_MODELS = {
     "GPT-4o": "full_gpt4o_extracted.jsonl",
@@ -717,8 +728,10 @@ def s5_noimage(EM0, EM2, meta, qs_by_mod, q2d):
     out["prior_file"] = prior
     # in-sample task-majority prior (predict the most frequent answer of the task)
     by_task = defaultdict(list)
+    analysed = {q for md in MODS for q in qs_by_mod[md]}
     for q, r in meta.items():
-        by_task[(r["modality"], r["task"])].append(norm_pred(r["answer"]))
+        if q in analysed:
+            by_task[(r["modality"], r["task"])].append(norm_pred(r["answer"]))
     task_prior = {k: 100 * Counter(v).most_common(1)[0][1] / len(v) for k, v in by_task.items()}
 
     print(f"  {'modality':10s} {'noimg':>6s} {'n':>5s} {'prior_in':>8s} {'prior_cv':>8s} "
@@ -771,7 +784,17 @@ def s5_noimage(EM0, EM2, meta, qs_by_mod, q2d):
     return out
 
 
-def s5b_cv_prior(EM2, qs_by_mod, q2d):
+def subset_task_prior(meta, qs):
+    """In-sample majority prior on the question set qs: per (modality, task) predict the most
+    frequent (normalised) answer among qs; returns EM % over qs."""
+    by = defaultdict(list)
+    for q in qs:
+        by[meta[q]["task"]].append(norm_pred(meta[q]["answer"]))
+    hit = sum(Counter(v).most_common(1)[0][1] for v in by.values())
+    return 100 * hit / len(qs) if qs else float("nan")
+
+
+def s5b_cv_prior(EM2, qs_by_mod, q2d, meta=None, subset=False):
     section("5b. v2 format EM vs the CROSS-VALIDATED majority prior "
             "(prior_and_subsets_results.json prior_cv mean; prior treated as a constant)")
     prior = load_prior()
@@ -798,6 +821,23 @@ def s5b_cv_prior(EM2, qs_by_mod, q2d):
                   f"{r['n_units']:5d} {r['n_obj']:4d}  {'YES' if ex else 'no'}")
         out[f"{md}|n_exceeding"] = n_ex
         print(f"  {md:10s} formats whose EM CI lies above the prior: {n_ex}/{len(FORMATS[md])}")
+        if subset:
+            sp = subset_task_prior(meta, qs_by_mod[md])
+            n_ex2 = 0
+            for f in FORMATS[md]:
+                o = out[f"{md}|{f}"]
+                ex2 = o["em_ci"]["lo"] > sp
+                n_ex2 += ex2
+                o.update(prior_subset_in_sample=sp, diff_subset_prior=o["em"] - sp,
+                         exceeds_subset_prior=ex2)
+                print(f"      vs in-sample majority prior on these {len(qs_by_mod[md])} subset "
+                      f"questions ({f1(sp)}): {f:16s} EM-prior {pp(o['em'] - sp):>6s} "
+                      f"CI [{o['em_ci']['lo'] - sp:+.1f}, {o['em_ci']['hi'] - sp:+.1f}]  "
+                      f"{'YES' if ex2 else 'no'}")
+            out[f"{md}|prior_subset_in_sample"] = sp
+            out[f"{md}|n_exceeding_subset_prior"] = n_ex2
+            print(f"  {md:10s} formats whose EM CI lies above the subset in-sample prior: "
+                  f"{n_ex2}/{len(FORMATS[md])}")
     return out
 
 
@@ -975,6 +1015,31 @@ def v1_image_sizes():
     return acc
 
 
+def s8b_model_input(v2rows):
+    section("8b. Model input size from the v2 rows (image as fed to the model)")
+    acc = defaultdict(lambda: defaultdict(list))
+    for (q, f), r in v2rows.items():
+        for k in ("image_w", "image_h", "model_input_w", "model_input_h", "n_visual_tokens"):
+            if r.get(k) is not None:
+                acc[(r["modality"], f)][k].append(float(r[k]))
+    out = {}
+    print(f"  {'modality':10s} {'format':16s} {'img w':>6s} {'img h':>6s} {'in w':>6s} "
+          f"{'in h':>6s} {'vis tok':>7s} {'n':>5s}")
+    for md in MODS:
+        for f in FORMATS[md] + ([DEG_FMT] if md == "graph" else []):
+            a = acc.get((md, f))
+            if not a:
+                continue
+            m = {k: sum(v) / len(v) for k, v in a.items()}
+            n = max(len(v) for v in a.values())
+            out[f"{md}|{f}"] = {**m, "n": n}
+            print(f"  {md:10s} {f:16s} "
+                  + " ".join(f"{m.get(k, float('nan')):6.0f}" for k in
+                             ("image_w", "image_h", "model_input_w", "model_input_h"))
+                  + f" {m.get('n_visual_tokens', float('nan')):7.0f} {n:5d}")
+    return out
+
+
 def s8_cost(v2rows, man, noimg_rows):
     section("8. Cost: mean image pixels (Mpx) and mean latency (s) per format")
     v1px = v1_image_sizes()
@@ -1022,10 +1087,13 @@ def parse_args():
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--smoke", action="store_true",
                    help="Run on whatever v2 files/shards exist; B_boot=1000, B_perm=2000.")
-    p.add_argument("--v1", default=os.path.join(ROOT, "results", "full_qwen_extracted.jsonl"))
+    p.add_argument("--model", choices=sorted(MODEL_FILES), default="qwen",
+                   help="Which model's v1/v2/no-image/assist files to analyse.")
+    p.add_argument("--v1", default=None, help="Default: results/<model v1 file>.")
     p.add_argument("--v2-dir", default=os.path.join(ROOT, "results", "v2"))
-    p.add_argument("--manifest", default=os.path.join(ROOT, "benchmark", "render_v2",
-                                                      "manifest.jsonl"))
+    p.add_argument("--manifest", default=None,
+                   help="Coverage/size manifest (default per model). Renderer constants are "
+                        "always read from benchmark/render_v2/manifest.jsonl.")
     p.add_argument("--benchmark", default=os.path.join(ROOT, "benchmark",
                                                        "realworld_test.jsonl"))
     p.add_argument("--out", default=None)
@@ -1050,26 +1118,31 @@ def main() -> int:
     B_BOOT = a.b_boot or B_BOOT
     B_PERM = a.b_perm or B_PERM
     extended = a.strict_answerable or a.exclude_near_constant
-    out_path = a.out or os.path.join(HERE, "v2_results_smoke.json" if a.smoke
-                                     else "v2_results_strict.json" if extended
-                                     else "v2_results.json")
+    mf = MODEL_FILES[a.model]
+    msuf = "" if a.model == "qwen" else f"_{a.model}"
+    out_path = a.out or os.path.join(HERE, f"v2_results{msuf}_smoke.json" if a.smoke
+                                     else f"v2_results{msuf}_strict.json" if extended
+                                     else f"v2_results{msuf}.json")
+    a.v1 = a.v1 or os.path.join(ROOT, "results", mf["v1"])
+    const_manifest = os.path.join(ROOT, "benchmark", "render_v2", "manifest.jsonl")
+    a.manifest = a.manifest or os.path.join(ROOT, "benchmark", "render_v2", mf["manifest"])
 
     bench = read_jsonl(a.benchmark)
     meta = {r["question_id"]: r for r in bench}
     q2d = {q: r["data_id"] for q, r in meta.items()}
     qs_by_mod = {md: [q for q, r in meta.items() if r["modality"] == md] for md in MODS}
 
-    shard_paths = sorted(glob.glob(os.path.join(a.v2_dir, "v2_qwen_shard*.jsonl")))
-    noimg_path = os.path.join(a.v2_dir, "noimage_qwen.jsonl")
-    assist_path = os.path.join(a.v2_dir, "assist_qwen.jsonl")
+    shard_paths = sorted(glob.glob(os.path.join(a.v2_dir, mf["v2_glob"])))
+    noimg_path = os.path.join(a.v2_dir, mf["noimg"])
+    assist_path = os.path.join(a.v2_dir, mf["assist"])
     missing = [p for p in [noimg_path, assist_path] if not os.path.exists(p)]
     if not shard_paths:
-        missing.insert(0, os.path.join(a.v2_dir, "v2_qwen_shard*.jsonl"))
+        missing.insert(0, os.path.join(a.v2_dir, mf["v2_glob"]))
     if missing and not a.smoke and not a.dump_fully_answerable:
         print("ERROR: missing inputs (use --smoke for partial runs):\n  " + "\n  ".join(missing))
         return 2
 
-    print(f"StructViz-Bench v2 analysis, Qwen2.5-VL-7B  (seed {SEED}, B_boot={B_BOOT}, "
+    print(f"StructViz-Bench v2 analysis, {mf['name']}  (seed {SEED}, B_boot={B_BOOT}, "
           f"B_perm={B_PERM}{', SMOKE' if a.smoke else ''})")
     print(f"questions {len(meta)}  objects {len(set(q2d.values()))}")
 
@@ -1078,13 +1151,17 @@ def main() -> int:
     if os.path.exists(a.manifest):
         for r in read_jsonl(a.manifest):
             man[(r["question_id"], r["viz_type"])] = r
+    cman = man
+    if os.path.abspath(a.manifest) != os.path.abspath(const_manifest) and os.path.exists(
+            const_manifest):
+        cman = {(r["question_id"], r["viz_type"]): r for r in read_jsonl(const_manifest)}
     const_by_q = {}
     const_src = Counter()
     for q in qs_by_mod["tabular"]:
         c = dict(V2_DEFAULTS)
         rc = {}
         for f in ("bar_chart", "scatter_plot"):
-            rc.update(man.get((q, f), {}).get("renderer_constants") or {})
+            rc.update(cman.get((q, f), {}).get("renderer_constants") or {})
         for k in c:
             if k in rc:
                 c[k] = rc[k]
@@ -1107,7 +1184,16 @@ def main() -> int:
         return 0
 
     # ---- predictions
-    v1rows, st1 = dedupe(read_jsonl(a.v1))
+    raw1 = read_jsonl(a.v1)
+    v1rows, st1 = dedupe(raw1)
+    if st1["keys_error_only"]:
+        for r in raw1:
+            k = (r["question_id"], r["viz_type"])
+            if k not in v1rows:
+                v1rows[k] = r  # scored exact_match 0, as in the released per-format EM
+        print(f"  NOTE v1: kept {st1['keys_error_only']} error-only keys as EM 0 (released "
+              f"scoring); questions affected "
+              f"{len({q for (q, f), r in v1rows.items() if is_error(r)})}")
     raw2 = []
     for p in shard_paths:
         raw2.extend(read_jsonl(p))
@@ -1130,6 +1216,14 @@ def main() -> int:
     unknown = sorted(set(got_v2) - set(exp_v2))
     if unknown:
         print(f"  WARN v2 viz types not in manifest: {unknown}")
+    v2q = {q for (q, f) in v2rows if f in FORMATS.get(meta[q]["modality"], [])}
+    subset = bool(v2q) and len(v2q) < len(meta)
+    if subset:
+        full_n = {md: len(qs_by_mod[md]) for md in MODS}
+        qs_by_mod = {md: [q for q in qs_by_mod[md] if q in v2q] for md in MODS}
+        print("v2 covers a SUBSET of questions; every section (incl. v1 comparisons and "
+              "all-answerable subsets) is restricted to it: "
+              + ", ".join(f"{md} {len(qs_by_mod[md])}/{full_n[md]}" for md in MODS))
     print("tabular renderer constants used (question counts): "
           + "; ".join(f"{dict(k)} x{v}" for k, v in const_src.items()))
 
@@ -1158,6 +1252,10 @@ def main() -> int:
                       "dedupe": {"v1": st1, "v2": st2, "noimage": st0, "assist": sta},
                       "v2_coverage": {f: [got_v2[f], exp_v2[f]] for f in exp_v2},
                       "v2_branches": {k: v for k, v in BRANCH.items() if k.startswith("v2")}}}
+    if a.model != "qwen":
+        res["config"].update(model=mf["name"], v1_file=os.path.relpath(a.v1, ROOT),
+                             subset=subset, n_questions_analysed={md: len(qs_by_mod[md])
+                                                                  for md in MODS})
     res["1_categories"] = s1_categories(meta, cat1, cat2, qs_by_mod)
     res["2_per_format"] = s2_per_format(EM1, EM2, qs_by_mod, q2d)
     if extended:
@@ -1181,10 +1279,12 @@ def main() -> int:
     res["4_flip_cr"] = s4_flip(EM1, P1, EM2, P2, qs_by_mod, q2d, nc=nc, meta=meta)
     res["5_noimage"] = s5_noimage(EM0, EM2, meta, qs_by_mod, q2d)
     if extended:
-        res["5b_cv_prior"] = s5b_cv_prior(EM2, qs_by_mod, q2d)
+        res["5b_cv_prior"] = s5b_cv_prior(EM2, qs_by_mod, q2d, meta=meta, subset=subset)
     res["6_assist"] = s6_assist(EMa, meta, q2d)
     res["7_degree"] = s7_degree(EM2, meta, qs_by_mod, q2d)
     res["8_cost"] = s8_cost(v2rows, man, noimg_rows)
+    if a.model != "qwen":
+        res["8b_model_input"] = s8b_model_input(v2rows)
     if extended:
         res["9_rule_selector"] = s9_rule_selector(q2d, meta, nc or load_near_constant())
 

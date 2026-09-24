@@ -162,6 +162,12 @@ with / without the column means). The v1 renderers are byte-identical
   system prompt); `scripts/run_v2_queue.sh` schedules the runs on shared GPUs;
   `scripts/merge_shards.py` merges and checks shards.
 - Results: `results/v2/v2_qwen.jsonl` (18,975 rows), `results/v2/noimage_qwen.jsonl` (3,795),
-  `results/v2/assist_qwen.jsonl` (1,020). Analysis: `scripts/analysis/v2_analysis.py`
-  (`v2_analysis_output.txt`, `v2_results.json`); `verify_paper_numbers.py` checks the paper's
-  Section 5(iv) numbers against these files.
+  `results/v2/assist_qwen.jsonl` (1,020), `results/v2/rawtext_qwen.jsonl` (3,795; the same
+  model given the data as text, `--raw-text`). A second open model, InternVL2.5-8B (revision
+  e9e4c0dc, 448-px single tile), was run on the 1,096 strictly fully-answerable questions
+  (`benchmark/render_v2/fully_answerable_qids.txt`, `manifest_subset32b.jsonl`):
+  `results/v2/v2_internvl_subset.jsonl` (5,480), `noimage_internvl.jsonl` (1,096),
+  `assist_internvl.jsonl` (1,020). Analysis: `scripts/analysis/v2_analysis.py`
+  (`v2_analysis_output.txt`, `v2_results.json`; `--strict-answerable` writes
+  `v2_results_strict.json`, `--model internvl` writes `v2_results_internvl_strict.json`);
+  `verify_paper_numbers.py` checks the paper's Section 5(iv) numbers against these files.

@@ -48,6 +48,7 @@ RAW_TEXT_VIZ = "raw_text"
 # Pinned HF revisions (commit hashes of the locally cached snapshots).
 PINNED_REVISIONS: dict[str, str] = {
     "qwen32b-hf": "7cfb30d71a1f4f49a57592323337a4a4727301da",
+    "internvl": "e9e4c0dc1db56bfab10458671519b7fa3dd29463",
 }
 
 MODEL_IDS: dict[str, str] = {
@@ -281,7 +282,13 @@ def build_model(model_key: str) -> Any:
     if model_key == "internvl":
         from src.models.local_models import InternVLModel
 
-        return InternVLModel(name="OpenGVLab/InternVL2_5-8B", device="cuda")
+        # Existing v1 path (4-bit NF4 via bitsandbytes, single 448x448 tile, its own short
+        # prompt). Only the checkpoint is pinned: load the local snapshot of the revision.
+        from huggingface_hub import snapshot_download
+
+        ckpt = snapshot_download("OpenGVLab/InternVL2_5-8B",
+                                 revision=PINNED_REVISIONS["internvl"], local_files_only=True)
+        return InternVLModel(name="OpenGVLab/InternVL2_5-8B", checkpoint=ckpt, device="cuda")
     raise ValueError(model_key)
 
 
@@ -371,12 +378,46 @@ def run_model(model: Any, question: str, image: Any, task: str) -> tuple[str | N
         raw, parsed = model.answer_with_raw(question=question, image=image, metadata=meta)
         return raw, parsed
     if image is None:
+        if type(model).__name__ == "InternVLModel":
+            return internvl_text_only(model, question, task)
         raise NotImplementedError(f"{type(model).__name__} has no text-only path")
     return None, str(model.answer(question=question, image=image, metadata=meta))
 
 
+def internvl_prompt(model: Any, question: str) -> str:
+    """The exact prompt string InternVLModel.answer passes to model.chat."""
+    return f"{model.system_prompt}\nQuestion: {question}"
+
+
+def internvl_text_only(model: Any, question: str, task: str) -> tuple[str, str]:
+    """No-image InternVL call: same prompt and generation config as InternVLModel.answer,
+    but ``pixel_values=None`` (InternVL chat's pure-text branch). Returns (raw, parsed)."""
+    import torch
+
+    from src.models.response_parser import parse_answer
+
+    if model._model is None:  # noqa: SLF001
+        model._load()  # noqa: SLF001
+    generation_config = {
+        "max_new_tokens": model.max_tokens,
+        "do_sample": model.temperature > 0.0,
+        "temperature": model.temperature,
+    }
+    try:
+        out = model._model.chat(  # noqa: SLF001
+            model._tokenizer, None, internvl_prompt(model, question), generation_config)  # noqa: SLF001
+        raw = str(out[0]) if isinstance(out, tuple) else str(out)
+        return raw, parse_answer(raw_response=raw, task=task)
+    finally:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+
 def prompt_hash(model: Any, question: str, has_image: bool) -> str | None:
     """sha256 of the chat-templated prompt (system + user turn + gen prompt)."""
+    if type(model).__name__ == "InternVLModel":
+        # Pre-template prompt string (InternVL's chat() applies its own template).
+        return hashlib.sha256(internvl_prompt(model, question).encode("utf-8")).hexdigest()
     if not hasattr(model, "build_prompt_text"):
         return None
     text = model.build_prompt_text(question, has_image=has_image)
@@ -640,6 +681,11 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
                 }
                 if args.model.startswith("qwen"):
                     img_meta.update(visual_geometry(image.width, image.height))
+                elif args.model == "internvl":
+                    # InternVLModel.answer resizes every image to one 448x448 tile.
+                    n_tok = getattr(getattr(model, "_model", None), "num_image_token", None)
+                    img_meta.update({"model_input_w": 448, "model_input_h": 448,
+                                     "n_visual_tokens": n_tok})
             has_image = image is not None
             pkey = (question, has_image)
             if pkey not in prompt_cache:
