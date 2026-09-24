@@ -672,6 +672,27 @@ def main() -> int:
         _skipped.append("human audit sheets")
         print("  SKIP  human audit sheets (human_eval_package/ratings_annotator{1,2}.csv missing)")
 
+    section("Section 4 — gap by data source (four core models; appendix_tables.json)")
+    _ap = os.path.join(ROOT, "scripts", "analysis", "appendix_tables.json")
+    if os.path.exists(_ap):
+        _rows = json.load(open(_ap))["source_split"]
+        _g = {(r["model"], r["modality"], r["source"]): r["gap"] for r in _rows}
+        _ms = ["GPT-4o", "Gemini-2.0-Flash", "Qwen2.5-VL-7B", "Claude Sonnet 4"]
+        _larger = sum(_g[(m, md, "realworld")] > _g[(m, md, "synthetic")] for m in _ms for md in MODS)
+        check_bool("real-world gap larger in 11 of 12 cells", _larger == 11, f"larger={_larger}")
+        def _rng(md, src):
+            v = [_g[(m, md, src)] for m in _ms]
+            return min(v), max(v)
+        for _lab, _md, _src, _lo, _hi in [("SciTabAlign tabular gaps 35.6-47.1pp", "tabular", "realworld", 35.6, 47.1),
+                                           ("synthetic tabular gaps 10.2-29.0pp", "tabular", "synthetic", 10.2, 29.0),
+                                           ("NetworkX graph gaps 21.2-35.6pp", "graph", "realworld", 21.2, 35.6),
+                                           ("synthetic graph gaps 12.8-19.8pp", "graph", "synthetic", 12.8, 19.8)]:
+            _mn, _mx = _rng(_md, _src)
+            check_bool(_lab, round(_mn, 1) == _lo and round(_mx, 1) == _hi, f"({_mn:.2f}, {_mx:.2f})")
+    else:
+        _skipped.append("source split (appendix_tables.json)")
+        print("  SKIP  source split (appendix_tables.json missing)")
+
     section("Figure 1 — teaser example (tabular_001326::difficulty=2-hop, key 303.1)")
     _tq = "tabular_001326::difficulty=2-hop"
     _ans = {}
