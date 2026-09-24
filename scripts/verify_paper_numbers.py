@@ -631,6 +631,34 @@ def main() -> int:
         check("tabular gap, 7B", 37.1, max(g7.values()) - min(g7.values()))
         check("tabular gap, 32B", 34.7, max(g32.values()) - min(g32.values()))
 
+    section("Figure 1 — teaser example (tabular_001326::difficulty=2-hop, key 303.1)")
+    _tq = "tabular_001326::difficulty=2-hop"
+    _ans = {}
+    for _name, _fn in ALL.items():
+        _recs = load(_fn)
+        if _recs is None:
+            continue
+        for r in _recs:
+            if r["question_id"] == _tq:
+                _ans[(_name, r["viz_type"])] = (str(r.get("prediction")), float(r.get("exact", r.get("exact_match", 0)) or 0))
+    _names = sorted({k[0] for k in _ans})
+    if len(_names) == 7:
+        for _viz, _n in [("table_image", 5), ("heatmap", 5), ("bar_chart", 0)]:
+            check_bool(f"teaser {_viz}: {_n}/7 models correct",
+                       sum(_ans[(m, _viz)][1] == 1 for m in _names) == _n,
+                       f"correct={sum(_ans[(m, _viz)][1] == 1 for m in _names)}")
+        check_bool("teaser bar_chart: all 7 models answer 75.77 (the column mean)",
+                   sum(_ans[(m, "bar_chart")][0] == "75.77" for m in _names) == 7)
+        _v2q = _load_v2("v2_qwen.jsonl")
+        if _v2q is not None:
+            _hit = [r for r in _v2q if r["question_id"] == _tq and r["viz_type"] == "bar_chart"]
+            check_bool("teaser corrected bar_chart: Qwen-7B correct (303.1)",
+                       bool(_hit) and float(_hit[-1].get("exact_match", 0)) == 1
+                       and str(_hit[-1].get("prediction")) == "303.1")
+    else:
+        _skipped.append("teaser example (seven model files)")
+        print("  SKIP  teaser example (some model files missing)")
+
     print("\n" + "=" * 78)
     if _fails:
         print(f"FAILED: {len(_fails)} check(s) did not match the paper")
