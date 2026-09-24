@@ -9,7 +9,10 @@ Stdlib only, no inference, deterministic (seed 0). Reads
 and writes LaTeX fragments into iclr2027/tables/ plus scripts/analysis/appendix_tables.json
 holding every number that appears in the fragments.
 
-    python scripts/analysis/appendix_tables.py [--score-field exact|exact_match]
+    python scripts/analysis/appendix_tables.py [--score-field exact_match|exact|auto]
+
+Default is exact_match, the field every other paper script scores with (verify_paper_numbers.py,
+cluster_cis.py); in full_claude_extracted.jsonl 31 rows have exact=1 but exact_match=0.
 
 Conventions follow scripts/verify_paper_numbers.py and scripts/analysis/cluster_cis.py:
 exact match in percent, best/worst formats chosen once on the full sample, object-cluster
@@ -361,7 +364,7 @@ def table_examples(rows):
 # ---------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--score-field", default="auto", choices=["auto", "exact", "exact_match"],
+    ap.add_argument("--score-field", default="exact_match", choices=["auto", "exact", "exact_match"],
                     help="auto = `exact` if the row has it, else `exact_match` (default)")
     args = ap.parse_args()
     os.makedirs(TAB_DIR, exist_ok=True)
