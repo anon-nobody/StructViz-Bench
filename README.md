@@ -171,3 +171,7 @@ with / without the column means). The v1 renderers are byte-identical
   (`v2_analysis_output.txt`, `v2_results.json`; `--strict-answerable` writes
   `v2_results_strict.json`, `--model internvl` writes `v2_results_internvl_strict.json`);
   `verify_paper_numbers.py` checks the paper's Section 5(iv) numbers against these files.
+- Human audits: `human_eval_package/` (100 v1 renderings, two raters) and `human_eval_package_v2/`
+  (30 corrected renderings re-judged by the same two raters; 22 repeat v1 items). Each holds the
+  items, images, returned sheets (notes withheld until de-anonymisation), a recomputation of every
+  disputed key (`analysis/`), and the aggregation scripts; the harness recomputes the appendix counts.

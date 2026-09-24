@@ -693,6 +693,30 @@ def main() -> int:
         _skipped.append("source split (appendix_tables.json)")
         print("  SKIP  source split (appendix_tables.json missing)")
 
+    section("Appendix — re-rating on the corrected suite (human_eval_package_v2)")
+    _hp2 = os.path.join(ROOT, "human_eval_package_v2")
+    _s2 = [os.path.join(_hp2, f"ratings_annotator{i}.csv") for i in (1, 2)]
+    _it2 = os.path.join(_hp2, "items.jsonl")
+    if all(os.path.exists(f) for f in _s2) and os.path.exists(_it2) and all(os.path.exists(f) for f in _sheets):
+        import csv as _csv
+        _v2 = [{x["item_id"]: x["rating"] for x in _csv.DictReader(open(f, encoding="utf-8"))} for f in _s2]
+        _v1 = [{x["item_id"]: x["rating"] for x in _csv.DictReader(open(f, encoding="utf-8"))} for f in _sheets]
+        _items = {json.loads(l)["item_id"]: json.loads(l) for l in open(_it2, encoding="utf-8") if l.strip()}
+        _mapped = [i for i, it in _items.items() if it.get("v1_item_id")]
+        check_bool("30 items, 22 mapped to v1 items", len(_items) == 30 and len(_mapped) == 22, f"{len(_items)}/{len(_mapped)}")
+        check_bool("both v2 sheets identical on all 30 items", all(_v2[0][i] == _v2[1][i] for i in _items))
+        _c = {k: sum(v == k for v in _v2[0].values()) for k in ("Correct", "Ambiguous", "Incorrect")}
+        check_bool("v2 verdicts 22 correct / 2 ambiguous / 6 incorrect", (_c["Correct"], _c["Ambiguous"], _c["Incorrect"]) == (22, 2, 6), str(_c))
+        for _md, _n in [("tabular", 9), ("graph", 7), ("timeseries", 6)]:
+            check_bool(f"v2 {_md}: {_n}/10 correct", sum(_v2[0][i] == "Correct" for i in _items if _items[i]["modality"] == _md) == _n)
+        for _k, _before in [(0, 6), (1, 3)]:
+            _b = sum(_v1[_k][_items[i]["v1_item_id"]] == "Correct" for i in _mapped)
+            _a = sum(_v2[_k][i] == "Correct" for i in _mapped)
+            check_bool(f"rater {_k+1}: mapped items correct {_before}/22 -> 17/22", (_b, _a) == (_before, 17), f"{_b}->{_a}")
+    else:
+        _skipped.append("v2 human re-rating sheets")
+        print("  SKIP  v2 human re-rating (human_eval_package_v2 sheets missing)")
+
     section("Figure 1 — teaser example (tabular_001326::difficulty=2-hop, key 303.1)")
     _tq = "tabular_001326::difficulty=2-hop"
     _ans = {}
